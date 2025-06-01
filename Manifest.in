@@ -1,0 +1,12 @@
+include README.md
+include LICENSE
+include requirements.txt
+recursive-include slurm_pipeline *.py
+recursive-exclude slurm_pipeline/__pycache__ *
+recursive-exclude slurm_pipeline *.pyc
+recursive-exclude slurm_pipeline *.pyo
+recursive-exclude tests *
+prune .git
+prune docs
+prune examples
+global-exclude *.py[cod] __pycache__ *.so *.dylib .DS_Store

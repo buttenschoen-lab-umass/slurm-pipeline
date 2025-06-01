@@ -1,0 +1,218 @@
+import os
+import numpy as np
+from typing import Dict, List, Tuple, Callable, Any, Optional, Union
+from dataclasses import dataclass
+from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
+
+
+@dataclass
+class SimulationResult:
+    """Container for simulation results"""
+    time: np.ndarray
+    solution: np.ndarray
+    params: Dict[str, Any]
+    sim_id: int
+    analysis: Optional[Dict[str, Any]] = None
+    output_dir: Optional[str] = None
+
+
+class SimulationPipeline:
+    """
+    Pipeline for a single simulation: run, analyze, visualize.
+
+    This is the basic building block - handles one simulation from start to finish.
+    """
+
+    def __init__(self,
+                 model_type: type,
+                 params: Dict[str, Any],
+                 integrator_params: Dict[str, Any],
+                 analysis_functions: Optional[Dict[str, Callable]] = None,
+                 plot_functions: Optional[Dict[str, Callable]] = None,
+                 animation_function: Optional[Callable] = None,
+                 save_function: Optional[Callable] = None,
+                 load_function: Optional[Callable] = None,
+                 sim_id: int = 0):
+        """
+        Initialize pipeline for a single simulation.
+
+        Args:
+            model_type: Model class to instantiate
+            params: Model parameters
+            integrator_params: Integration parameters (dt, etc.)
+            analysis_functions: Dict of functions for analysis
+            plot_functions: Dict of functions for plotting
+            animation_function: Function for animation
+            save_function: Function to save data
+            load_function: Function to load data
+            sim_id: Simulation ID (default: 0)
+        """
+        self.model_type = model_type
+        self.params = params
+        self.integrator_params = integrator_params
+        self.sim_id = sim_id
+
+        # Analysis and visualization
+        self.analysis_functions = analysis_functions or {}
+        self.plot_functions = plot_functions or {}
+        self.animation_function = animation_function
+
+        # I/O
+        self.save_function = save_function
+        self.load_function = load_function
+
+        # Create model instance
+        self.model = model_type(**params)
+
+    def run(self,
+            T: float = 50.0,
+            initial_state: Optional[np.ndarray] = None,
+            progress: bool = False) -> SimulationResult:
+        """
+        Run the simulation.
+
+        Args:
+            T: Simulation time
+            initial_state: Initial conditions (uses random if None)
+            progress: Show progress bar
+
+        Returns:
+            SimulationResult object
+        """
+        # Generate initial state if needed
+        if initial_state is None:
+            initial_state = self.model.random_ic()
+
+        # Run simulation
+        t, solution = self.model.simulate(
+            T=T,
+            initial_state=initial_state,
+            progress=progress,
+            **self.integrator_params
+        )
+
+        return SimulationResult(
+            time=t,
+            solution=solution,
+            params=self.params,
+            sim_id=self.sim_id
+        )
+
+    def analyze(self, result: SimulationResult) -> SimulationResult:
+        """
+        Run all analysis functions on the result.
+
+        Args:
+            result: SimulationResult to analyze
+
+        Returns:
+            SimulationResult with analysis added
+        """
+        analysis = {}
+
+        for name, func in self.analysis_functions.items():
+            try:
+                analysis[name] = func(result.time, result.solution, self.model)
+            except Exception as e:
+                print(f"Analysis '{name}' failed: {e}")
+                analysis[name] = None
+
+        result.analysis = analysis
+        return result
+
+    def visualize(self,
+                  result: SimulationResult,
+                  output_dir: str,
+                  plots: bool = True,
+                  animation: bool = True) -> SimulationResult:
+        """
+        Create visualizations for the simulation.
+
+        Args:
+            result: SimulationResult to visualize
+            output_dir: Directory for outputs
+            plots: Create static plots
+            animation: Create animation
+
+        Returns:
+            SimulationResult with output_dir set
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        result.output_dir = output_dir
+
+        # Create plots
+        if plots:
+            for name, func in self.plot_functions.items():
+                try:
+                    save_path = os.path.join(output_dir, f"{name}.png")
+                    fig = func(result.time, result.solution, model=self.model, save_path=save_path)
+
+                    # If the function doesn't save the figure itself, close it
+                    if fig is not None and isinstance(fig, plt.Figure):
+                        plt.close(fig)
+                except Exception as e:
+                    print(f"Plot '{name}' failed: {e}")
+                    # Make sure any open figures are closed on error
+                    plt.close('all')
+
+        # Create animation
+        if animation and self.animation_function:
+            try:
+                anim_path = os.path.join(output_dir, "animation.mp4")
+                self.animation_function(result.time, result.solution,
+                                      model=self.model, save_path=anim_path)
+            except Exception as e:
+                print(f"Animation failed: {e}")
+
+        return result
+
+    def save(self, result: SimulationResult, filepath: str) -> None:
+        """Save simulation data."""
+        if self.save_function:
+            self.save_function(result.time, result.solution, result.params, filepath, sim_id=result.sim_id)
+
+    def load(self, filepath: str) -> SimulationResult:
+        """Load simulation data."""
+        if self.load_function:
+            data = self.load_function(filepath)
+            # Handle both old format (3-tuple) and new format (with sim_id)
+            if isinstance(data, tuple) and len(data) == 3:
+                t, solution, params = data
+                sim_id = 0  # Default for old format
+            elif isinstance(data, tuple) and len(data) == 4:
+                t, solution, params, sim_id = data
+            else:
+                raise ValueError(f"Unexpected data format from load function: {type(data)}")
+
+            return SimulationResult(time=t, solution=solution, params=params, sim_id=sim_id)
+        else:
+            raise ValueError("No load function provided")
+
+    def run_complete(self,
+                     T: float = 50.0,
+                     initial_state: Optional[np.ndarray] = None,
+                     output_dir: Optional[str] = None,
+                     save_data: bool = True,
+                     progress: bool = True) -> SimulationResult:
+        """
+        Run complete pipeline: simulate, analyze, visualize, save.
+
+        This is a convenience method that runs everything.
+        """
+        # Run simulation
+        result = self.run(T, initial_state, progress)
+
+        # Analyze
+        result = self.analyze(result)
+
+        # Visualize if output directory provided
+        if output_dir:
+            result = self.visualize(result, output_dir)
+
+            # Save data
+            if save_data and self.save_function:
+                data_path = os.path.join(output_dir, "simulation_data.npz")
+                self.save(result, data_path)
+
+        return result
