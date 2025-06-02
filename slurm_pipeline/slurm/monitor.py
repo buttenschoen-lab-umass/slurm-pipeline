@@ -17,15 +17,17 @@ from .job import JobState, JobInfo
 class SlurmMonitor:
     """Monitor SLURM jobs with progress tracking."""
 
-    def __init__(self, check_interval: int = 10):
+    def __init__(self, check_interval: int = 10, job_tracker=None):
         """
         Initialize SLURM monitor.
 
         Args:
             check_interval: Seconds between status checks
+            job_tracker: Optional JobTracker instance for automatic tracking
         """
         self.check_interval = check_interval
         self.active_monitors = {}
+        self.job_tracker = job_tracker
 
     def monitor_job(self,
                    job_id: str,
@@ -100,6 +102,9 @@ class SlurmMonitor:
                 # Check if job is done
                 if job_info.state in [JobState.COMPLETED, JobState.FAILED,
                                      JobState.CANCELLED, JobState.TIMEOUT]:
+                    # Notify job tracker if available
+                    if self.job_tracker:
+                        self.job_tracker.complete_job(job_id)
                     break
 
                 time.sleep(self.check_interval)
@@ -235,6 +240,10 @@ class SlurmMonitor:
                         info['completed'] = True
                         results.append(job_info)
                         overall_bar.update(1)
+
+                        # Notify job tracker if available
+                        if self.job_tracker:
+                            self.job_tracker.complete_job(job_id)
 
                 time.sleep(self.check_interval)
 
