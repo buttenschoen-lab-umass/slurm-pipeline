@@ -99,24 +99,48 @@ def run_scan_array(obj, config, array_index):
     ensemble = Ensemble(
         obj.model_type, params, obj.integrator_params,
         obj.analysis_functions, obj.plot_functions, obj.animation_function,
-        obj.ensemble_analysis_functions, obj.ensemble_plot_functions
+        obj.ensemble_analysis_functions, obj.ensemble_plot_functions,
+        save_function=obj.save_function,  # Make sure save function is passed
+        load_function=obj.load_function
     )
+
+    # Get number of simulations from config
+    n_sims = config.get('n_simulations_per_point', 20)
+    print(f"Running {n_sims} simulations for this parameter point")
+
+    # Determine plotting behavior
+    # If always_plot_all is True, set max_individual_plots to n_sims
+    always_plot_all = config.get('always_plot_all', False)
+    max_plots = n_sims if always_plot_all else config.get('max_individual_plots', 5)
 
     # Run ensemble
     ensemble.run(
-        n_simulations=config['n_simulations_per_point'],
+        n_simulations=n_sims,
         T=config['T'],
         output_dir=str(output_dir),
         parallel=config.get('parallel', False),
-        max_workers=config.get('max_workers', None),  # Pass through the worker count
+        max_workers=config.get('max_workers', None),
         progress=False,  # No progress bar for individual ensembles in array jobs
         create_individual_plots=config.get('create_individual_plots', True),
-        create_individual_animations=config.get('create_individual_animations', True),
-        max_individual_plots=config.get('max_individual_plots')
+        create_individual_animations=config.get('create_individual_animations', False),
+        max_individual_plots=max_plots  # Use computed value
     )
 
     # Run ensemble analysis
     ensemble_analysis = ensemble.analyze()
+
+    # IMPORTANT: Save simulation data for ALL simulations
+    if config.get('save_simulation_data', True) and obj.save_function:
+        print(f"Saving simulation data for {len(ensemble.results)} simulations...")
+        for i, result in enumerate(ensemble.results):
+            sim_dir = output_dir / f"simulation_{result.sim_id:03d}"
+            sim_dir.mkdir(exist_ok=True)
+
+            # Save the .npz file with simulation data
+            data_path = sim_dir / "simulation_data.npz"
+            obj.save_function(result.time, result.solution, result.params, str(data_path), sim_id=result.sim_id)
+
+        print(f"Saved data for all {len(ensemble.results)} simulations")
 
     # Create ensemble visualizations if requested
     if config.get('create_ensemble_plots', True):
@@ -146,18 +170,37 @@ def run_scan_array(obj, config, array_index):
 def run_complete_ensemble(obj, config):
     """Run complete ensemble with post-processing."""
     print("Running complete ensemble")
+
+    # Determine plotting behavior
+    n_sims = config['n_simulations']
+    always_plot_all = config.get('always_plot_all', False)
+    max_plots = n_sims if always_plot_all else config.get('max_individual_plots', 5)
+
     obj.run(
-        n_simulations=config['n_simulations'],
+        n_simulations=n_sims,
         T=config['T'],
         parallel=config.get('parallel', True),
         output_dir=config.get('output_dir'),
         create_individual_plots=config.get('create_individual_plots', True),
-        create_individual_animations=config.get('create_individual_animations', True),
-        max_individual_plots=config.get('max_individual_plots')
+        create_individual_animations=config.get('create_individual_animations', False),
+        max_individual_plots=max_plots
     )
 
     # Run analysis
     ensemble_analysis = obj.analyze()
+
+    # Save simulation data if requested
+    if config.get('save_simulation_data', True) and obj.save_function and config.get('output_dir'):
+        output_dir = Path(config['output_dir'])
+        print(f"Saving simulation data for {len(obj.results)} simulations...")
+
+        for result in obj.results:
+            sim_dir = output_dir / f"simulation_{result.sim_id:03d}"
+            if sim_dir.exists():  # Only save if the directory was created
+                data_path = sim_dir / "simulation_data.npz"
+                obj.save_function(result.time, result.solution, result.params, str(data_path), sim_id=result.sim_id)
+
+        print(f"Saved data for all simulations")
 
     # Create visualizations
     if config.get('output_dir') and config.get('create_ensemble_plots', True):
@@ -179,15 +222,21 @@ def run_complete_ensemble(obj, config):
 def run_complete_scan(obj, config):
     """Run complete parameter scan."""
     print("Running complete parameter scan")
+
+    # Determine plotting behavior
+    always_plot_all = config.get('always_plot_all', False)
+    n_sims = config.get('n_simulations_per_point', 20)
+    max_plots = n_sims if always_plot_all else config.get('max_individual_plots', 5)
+
     obj.run(
-        n_simulations_per_point=config['n_simulations_per_point'],
+        n_simulations_per_point=n_sims,
         T=config['T'],
         parallel=config.get('parallel', True),
         parallel_mode=config.get('parallel_mode', 'auto'),
         output_dir=config.get('output_dir'),
         create_individual_plots=config.get('create_individual_plots', True),
-        create_individual_animations=config.get('create_individual_animations', True),
-        max_individual_plots=config.get('max_individual_plots')
+        create_individual_animations=config.get('create_individual_animations', False),
+        max_individual_plots=max_plots
     )
 
     # Run scan-level analysis
@@ -227,7 +276,7 @@ def run_single_pipeline(obj, config):
             result,
             config['output_dir'],
             plots=config.get('create_plots', True),
-            animation=config.get('create_animation', True)
+            animation=config.get('create_animation', False)
         )
 
         # Save data
@@ -267,7 +316,7 @@ def main():
         # This ensures functions are available when unpickling
         if env_file and env_file.exists():
             print("\nLoading environment before unpickling...")
-            from runner_env import _env_loader, RECREATED_FUNCTIONS
+            from runner_env import _env_loader, RECREATED_FUNCTIONS, update_object_functions
 
             # Force reload of environment
             _env_loader.load_from_file(env_file)
@@ -293,7 +342,8 @@ def main():
 
         # Apply captured environment updates to the object
         # This updates the object's function references to use the recreated versions
-        update_object_functions(obj)
+        if env_file and env_file.exists():
+            update_object_functions(obj)
 
         # Determine object type and run appropriately
         obj_type = config['type']
