@@ -10,24 +10,30 @@ import sys
 import json
 import pickle
 import subprocess
+import logging
 import time
 from typing import Dict, List, Tuple, Any, Optional
 from pathlib import Path
 from datetime import datetime
+from collections.abc import Callable
 
 from .config import SlurmConfig
 from .monitor import SlurmMonitor, JobInfo, JobState
 from .job_tracker import JobTracker
 from .runner_generator import get_runner_script_content
+from .environment_capture import EnvironmentCapture
 
 
 class SlurmPipeline:
-    """Wrapper to run pipeline objects on SLURM with automatic job tracking."""
+    """Wrapper to run pipeline objects on SLURM with automatic job tracking and environment capture."""
 
     def __init__(self,
                  nfs_work_dir: str = "/home/adrs0061/cluster/slurm_pipeline",
                  monitor_interval: int = 10,
-                 track_jobs: bool = True):
+                 track_jobs: bool = True,
+                 capture_environment: bool = True,
+                 capture_log_dir: Optional[str] = None,
+                 log_level: str = "INFO"):
         """
         Initialize SLURM pipeline wrapper.
 
@@ -35,7 +41,21 @@ class SlurmPipeline:
             nfs_work_dir: NFS directory accessible from all nodes (can use $USER)
             monitor_interval: Seconds between status checks for monitoring
             track_jobs: Whether to track and auto-cancel jobs on exit
+            capture_environment: Whether to capture and transmit Python environment
+            capture_log_dir: Directory for environment capture logs
         """
+        # Set up logging
+        self.logger = logging.getLogger(f"{self.__class__.__name__}")
+        self.logger.setLevel(getattr(logging, log_level.upper()))
+
+        # Add console handler if not already present
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setLevel(getattr(logging, log_level.upper()))
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+
         # Expand environment variables in paths
         self.nfs_work_dir = Path(os.path.expandvars(nfs_work_dir))
         self.nfs_work_dir.mkdir(exist_ok=True, parents=True)
@@ -60,6 +80,14 @@ class SlurmPipeline:
 
         self.monitor = SlurmMonitor(check_interval=monitor_interval, job_tracker=self.job_tracker if track_jobs else None)
         self.runner_script = None
+
+        # Environment capture
+        self.capture_environment = capture_environment
+        if capture_log_dir:
+            self.capture_log_dir = Path(capture_log_dir)
+        else:
+            self.capture_log_dir = self.nfs_work_dir / "capture_logs"
+        self.capture_log_dir.mkdir(exist_ok=True, parents=True)
 
     def _normalize_output_dir(self, output_dir: Optional[str], default_subdir: str) -> str:
         """
@@ -100,21 +128,160 @@ class SlurmPipeline:
             pickle.dump(obj, f)
         return filepath
 
+    def _serialize_with_environment(self, obj: Any, name: str,
+                                   analysis_functions: Optional[Dict[str, Callable]] = None,
+                                   plot_functions: Optional[Dict[str, Callable]] = None,
+                                   ensemble_analysis_functions: Optional[Dict[str, Callable]] = None,
+                                   ensemble_plot_functions: Optional[Dict[str, Callable]] = None) -> Tuple[Path, Optional[Path]]:
+        """Serialize object and optionally capture environment."""
+
+        # Serialize the object
+        object_file = self._serialize_object(obj, name)
+
+        if not self.capture_environment:
+            return object_file, None
+
+        # Set up logging for this capture
+        log_file = self.capture_log_dir / f"{name}_capture.log"
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file, mode='w'),
+                logging.StreamHandler()
+            ],
+            force=True
+        )
+        logger = logging.getLogger(f"capture_{name}")
+
+        print(f"\n{'='*60}")
+        print(f"ENVIRONMENT CAPTURE FOR: {name}")
+        print(f"Capture log: {log_file}")
+        print(f"{'='*60}\n")
+
+        # Create environment capture
+        env_capture = EnvironmentCapture(logger)
+
+        # Capture current environment
+        env_capture.capture_current_environment()
+
+        # Capture object dependencies
+        env_capture.capture_object_dependencies(
+            obj, name,
+            analysis_functions=analysis_functions,
+            plot_functions=plot_functions,
+            ensemble_analysis_functions=ensemble_analysis_functions,
+            ensemble_plot_functions=ensemble_plot_functions
+        )
+
+        # Save environment
+        env_file = self.nfs_input_dir / f"{name}_env.pkl"
+        with open(env_file, 'wb') as f:
+            pickle.dump(env_capture, f)
+
+        logger.info(f"\nEnvironment saved to: {env_file}")
+
+        # Save a summary report
+        summary_file = self.capture_log_dir / f"{name}_capture_summary.json"
+        summary = env_capture.get_capture_summary()
+
+        with open(summary_file, 'w') as f:
+            json.dump(summary, f, indent=2)
+
+        print(f"\nCapture summary saved to: {summary_file}")
+        print(f"\nCapture Summary:")
+        print(f"  - Required modules: {summary['total_required_modules']}")
+        print(f"  - Inline functions: {summary['total_inline_functions']}")
+        print(f"  - Python paths: {summary['total_paths']}")
+
+        if summary['inline_functions']:
+            print(f"\nCaptured inline functions:")
+            for func_name in summary['inline_functions'][:10]:
+                print(f"    - {func_name}")
+            if len(summary['inline_functions']) > 10:
+                print(f"    ... and {len(summary['inline_functions']) - 10} more")
+
+        return object_file, env_file
+
     def _create_runner_script(self) -> Path:
-        """Create the runner script in NFS directory."""
+        """Create the runner script in NFS directory with optional environment support."""
         if self.runner_script is None:
             runner_path = self.nfs_scripts_dir / "runner.py"
 
-            # Get the runner script content
+            # Get the base runner script content
+            from .runner_generator import get_runner_script_content
             runner_content = get_runner_script_content()
 
-            # Write to file
+            # Add environment support if enabled
+            if self.capture_environment:
+                # Create the environment module
+                from .runner_env_module import RunnerEnvironmentModule
+                RunnerEnvironmentModule.create_module_file(self.nfs_scripts_dir)
+                self.logger.info("Created runner environment module")
+
+                # Modify runner script to use environment module
+                lines = runner_content.split('\n')
+
+                # Add import after other imports
+                import_index = 0
+                for i, line in enumerate(lines):
+                    if line.strip().startswith(('import ', 'from ')):
+                        import_index = i + 1
+                    elif line.strip().startswith('def '):
+                        break
+
+                lines.insert(import_index, "\n# Environment support\nfrom runner_env import update_object_functions\n")
+
+                # Add update call after "Object loaded successfully"
+                for i, line in enumerate(lines):
+                    if 'print("Object loaded successfully")' in line:
+                        lines.insert(i + 1, "\n        # Apply captured environment\n        update_object_functions(obj)\n")
+                        break
+
+                runner_content = '\n'.join(lines)
+
+            # Write the final runner script
             with open(runner_path, 'w') as f:
                 f.write(runner_content)
             runner_path.chmod(0o755)
+
             self.runner_script = runner_path
+            self.logger.info(f"Created runner script: {runner_path}")
 
         return self.runner_script
+
+    def _create_slurm_script(self,
+                           config: SlurmConfig,
+                           runner_script: Path,
+                           object_file: Path,
+                           config_file: Path,
+                           array_jobs: bool,
+                           env_file: Optional[Path] = None) -> Path:
+        """Create SLURM submission script."""
+        script_content = config.to_sbatch_header()
+
+        # Add directory change so runner_env.py can be imported
+        script_content += f"\n# Change to scripts directory for imports\ncd {self.nfs_scripts_dir}\n"
+
+        # Add Python command
+        if array_jobs:
+            if env_file:
+                script_content += f"\npython {runner_script} {object_file} {config_file} $SLURM_ARRAY_TASK_ID {env_file}\n"
+            else:
+                script_content += f"\npython {runner_script} {object_file} {config_file} $SLURM_ARRAY_TASK_ID\n"
+        else:
+            if env_file:
+                script_content += f"\npython {runner_script} {object_file} {config_file} 0 {env_file}\n"
+            else:
+                script_content += f"\npython {runner_script} {object_file} {config_file}\n"
+
+        # Save script
+        script_path = self.nfs_scripts_dir / f"{config.job_name}.sbatch"
+        with open(script_path, 'w') as f:
+            f.write(script_content)
+
+        script_path.chmod(0o755)
+        return script_path
 
     def submit_ensemble(self,
                        ensemble,
@@ -178,7 +345,14 @@ class SlurmPipeline:
         slurm_config.slurm_output_dir = str(self.nfs_work_dir / "logs")
 
         # Serialize ensemble and config to NFS
-        ensemble_file = self._serialize_object(ensemble, slurm_config.job_name)
+        ensemble_file, env_file = self._serialize_with_environment(
+            ensemble, slurm_config.job_name,
+            analysis_functions=ensemble.analysis_functions,
+            plot_functions=ensemble.plot_functions,
+            ensemble_analysis_functions=ensemble.ensemble_analysis_functions,
+            ensemble_plot_functions=ensemble.ensemble_plot_functions
+        )
+
         config_file = self.nfs_input_dir / f"{slurm_config.job_name}_config.json"
         with open(config_file, 'w') as f:
             json.dump(config, f, indent=2)
@@ -188,7 +362,7 @@ class SlurmPipeline:
 
         # Create SLURM script
         slurm_script = self._create_slurm_script(
-            slurm_config, runner_script, ensemble_file, config_file, array_jobs
+            slurm_config, runner_script, ensemble_file, config_file, array_jobs, env_file
         )
 
         # Submit job
@@ -203,6 +377,10 @@ class SlurmPipeline:
             'config_file': str(config_file),
             'ensemble_file': str(ensemble_file)
         }
+
+        if env_file:
+            result['env_file'] = str(env_file)
+            result['capture_log'] = str(self.capture_log_dir / f"{slurm_config.job_name}_capture.log")
 
         if wait_for_completion:
             # Monitor job progress
@@ -281,7 +459,6 @@ class SlurmPipeline:
             'scan_params': scan.scan_params,
             'base_params': scan.base_params,
             'output_dir': output_dir,
-            'parallel': False,  # Disable internal parallelization
             **kwargs
         }
 
@@ -289,19 +466,41 @@ class SlurmPipeline:
         if array_jobs:
             slurm_config.array_size = n_points
             slurm_config.job_name = f"{base_name}_array"
-            # Increase resources per job since each runs an ensemble
-            slurm_config.cpus_per_task = min(n_simulations_per_point, 8)
+            config['parallel'] = True
+            config['max_workers'] = slurm_config.cpus_per_task
+            self.logger.info(f"Array jobs: Each task will use {slurm_config.cpus_per_task} CPUs in parallel")
         else:
-            slurm_config.cpus_per_task = kwargs.get('max_workers', 8)
+            slurm_config.job_name = base_name
+            if 'max_workers' not in kwargs:
+                # Default to number of parameter points, but cap at reasonable number
+                config['max_workers'] = min(n_points, slurm_config.cpus_per_task)
+
             config['parallel'] = True
             config['parallel_mode'] = 'scan'
-            slurm_config.job_name = base_name
+            self.logger.info(f"Single job: Will parallelize across {n_points} parameter points")
+
+        # Log the configuration
+        self.logger.info(f"Parameter scan configuration:")
+        self.logger.info(f"  - {n_points} parameter points")
+        self.logger.info(f"  - {n_simulations_per_point} simulations per point")
+        self.logger.info(f"  - Total simulations: {n_points * n_simulations_per_point}")
+        self.logger.info(f"  - Array jobs: {array_jobs}")
+        self.logger.info(f"  - CPUs per task: {slurm_config.cpus_per_task}")
+        self.logger.info(f"  - Parallel within task: {config.get('parallel', False)}")
+        self.logger.info(f"  - Workers per task: {config.get('max_workers', 1)}")
 
         # Update SLURM output directory
         slurm_config.slurm_output_dir = str(self.nfs_work_dir / "logs")
 
         # Serialize scan and config to NFS
-        scan_file = self._serialize_object(scan, slurm_config.job_name)
+        scan_file, env_file = self._serialize_with_environment(
+            scan, slurm_config.job_name,
+            analysis_functions=scan.analysis_functions,
+            plot_functions=scan.plot_functions,
+            ensemble_analysis_functions=scan.ensemble_analysis_functions,
+            ensemble_plot_functions=scan.ensemble_plot_functions
+        )
+
         config_file = self.nfs_input_dir / f"{slurm_config.job_name}_config.json"
         with open(config_file, 'w') as f:
             json.dump(config, f, indent=2)
@@ -311,7 +510,7 @@ class SlurmPipeline:
 
         # Create SLURM script
         slurm_script = self._create_slurm_script(
-            slurm_config, runner_script, scan_file, config_file, array_jobs
+            slurm_config, runner_script, scan_file, config_file, array_jobs, env_file
         )
 
         # Submit job
@@ -327,6 +526,10 @@ class SlurmPipeline:
             'scan_file': str(scan_file),
             'scan_params': scan.scan_params
         }
+
+        if env_file:
+            result['env_file'] = str(env_file)
+            result['capture_log'] = str(self.capture_log_dir / f"{slurm_config.job_name}_capture.log")
 
         if wait_for_completion:
             # Monitor job progress
@@ -396,7 +599,12 @@ class SlurmPipeline:
         }
 
         # Serialize pipeline and config to NFS
-        pipeline_file = self._serialize_object(pipeline, slurm_config.job_name)
+        pipeline_file, env_file = self._serialize_with_environment(
+            pipeline, slurm_config.job_name,
+            analysis_functions=pipeline.analysis_functions,
+            plot_functions=pipeline.plot_functions
+        )
+
         config_file = self.nfs_input_dir / f"{slurm_config.job_name}_config.json"
         with open(config_file, 'w') as f:
             json.dump(config, f, indent=2)
@@ -406,13 +614,13 @@ class SlurmPipeline:
 
         # Create SLURM script
         slurm_script = self._create_slurm_script(
-            slurm_config, runner_script, pipeline_file, config_file, False
+            slurm_config, runner_script, pipeline_file, config_file, False, env_file
         )
 
         # Submit job
         job_id = self._submit_job(slurm_script)
 
-        return {
+        result = {
             'job_id': job_id,
             'job_name': slurm_config.job_name,
             'output_dir': output_dir,
@@ -420,30 +628,11 @@ class SlurmPipeline:
             'pipeline_file': str(pipeline_file)
         }
 
-    def _create_slurm_script(self,
-                           config: SlurmConfig,
-                           runner_script: Path,
-                           object_file: Path,
-                           config_file: Path,
-                           array_jobs: bool) -> Path:
-        """Create SLURM submission script."""
-        script_content = config.to_sbatch_header()
+        if env_file:
+            result['env_file'] = str(env_file)
+            result['capture_log'] = str(self.capture_log_dir / f"{slurm_config.job_name}_capture.log")
 
-        # Add Python command
-        if array_jobs:
-            script_content += f"\npython {runner_script} {object_file} {config_file} $SLURM_ARRAY_TASK_ID\n"
-        else:
-            script_content += f"\npython {runner_script} {object_file} {config_file}\n"
-
-        # Save script to NFS scripts directory
-        script_path = self.nfs_scripts_dir / f"{config.job_name}.sbatch"
-        with open(script_path, 'w') as f:
-            f.write(script_content)
-
-        # Make script executable
-        script_path.chmod(0o755)
-
-        return script_path
+        return result
 
     def _submit_job(self, script_path: Path) -> str:
         """Submit SLURM script and return job ID."""
@@ -603,7 +792,7 @@ class SlurmPipeline:
 
         # Update tracker if job completed
         job_id = submission_result['job_id']
-        if self.track_jobs and job_info.state in [JobState.COMPLETED, JobState.FAILED,
+        if self.job_tracker and job_info.state in [JobState.COMPLETED, JobState.FAILED,
                                                    JobState.CANCELLED, JobState.TIMEOUT]:
             self.job_tracker.complete_job(job_id)
 
@@ -700,7 +889,95 @@ class SlurmPipeline:
 
         return scan_results
 
-    def cancel_job(self, job_id: str, reason: str = "Manual cancellation") -> bool:
+    def configure_environment_capture(self,
+                                    local_paths: list[str] | None = None,
+                                    installed_paths: list[str] | None = None,
+                                    excluded_modules: list[str] | None = None) -> None:
+        """
+        Configure environment capture behavior.
+
+        Args:
+            local_paths: Paths to always treat as containing local modules
+            installed_paths: Paths to always treat as containing installed packages
+            excluded_modules: Module names to never capture
+
+        Example:
+            slurm = SlurmPipeline()
+            slurm.configure_environment_capture(
+                local_paths=['/home/user/my_project', '/home/user/utils'],
+                installed_paths=['/home/user/.local/lib/python3.9/site-packages/my_editable_package'],
+                excluded_modules=['test_module', 'debug_utils']
+            )
+        """
+        if not hasattr(self, 'env_config'):
+            self.env_config = types.SimpleNamespace()
+
+        self.env_config.local_paths = local_paths or []
+        self.env_config.installed_paths = installed_paths or []
+        self.env_config.excluded_modules = excluded_modules or []
+
+        print("Environment capture configured:")
+        if self.env_config.local_paths:
+            print(f"  Force local paths: {self.env_config.local_paths}")
+        if self.env_config.installed_paths:
+            print(f"  Force installed paths: {self.env_config.installed_paths}")
+        if self.env_config.excluded_modules:
+            print(f"  Excluded modules: {self.env_config.excluded_modules}")
+
+    def preview_environment_capture(self, obj: Any,
+                                  analysis_functions: dict[str, Callable] | None = None,
+                                  plot_functions: dict[str, Callable] | None = None) -> dict[str, list[str]]:
+        """
+        Preview what would be captured without actually submitting.
+
+        Returns:
+            Dictionary with 'local_modules', 'installed_modules', 'inline_functions'
+        """
+        # Create a temporary logger
+        import io
+        log_stream = io.StringIO()
+        handler = logging.StreamHandler(log_stream)
+        handler.setLevel(logging.INFO)
+        logger = logging.getLogger('preview')
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+
+        # Create temporary capture
+        env_capture = EnvironmentCapture(logger)
+
+        # Apply configuration if exists
+        if hasattr(self, 'env_config'):
+            for path in self.env_config.local_paths:
+                env_capture.add_local_path(path)
+            for path in self.env_config.installed_paths:
+                env_capture.add_installed_path(path)
+            for module in self.env_config.excluded_modules:
+                env_capture.exclude_module(module)
+
+        # Capture environment
+        env_capture.capture_current_environment()
+        env_capture.symbol_tracker.analyze_object(obj, "preview_object")
+        env_capture.capture_local_modules(obj)
+
+        # Capture functions
+        all_functions = {}
+        if analysis_functions:
+            all_functions.update(analysis_functions)
+        if plot_functions:
+            all_functions.update(plot_functions)
+
+        env_capture.capture_inline_functions(all_functions)
+
+        # Return summary
+        return {
+            'local_modules': list(env_capture.local_modules.keys()),
+            'installed_modules': [
+                f"{name} ({info['reason']})"
+                for name, info in env_capture.installed_modules.items()
+            ],
+            'inline_functions': list(env_capture.inline_functions.keys()),
+            'excluded_modules': list(env_capture.excluded_modules)
+        }
         """
         Cancel a specific SLURM job.
 

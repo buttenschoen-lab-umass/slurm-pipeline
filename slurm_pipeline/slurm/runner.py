@@ -108,6 +108,8 @@ def run_scan_array(obj, config, array_index):
         T=config['T'],
         output_dir=str(output_dir),
         parallel=config.get('parallel', False),
+        max_workers=config.get('max_workers', None),  # Pass through the worker count
+        progress=False,  # No progress bar for individual ensembles in array jobs
         create_individual_plots=config.get('create_individual_plots', True),
         create_individual_animations=config.get('create_individual_animations', True),
         max_individual_plots=config.get('max_individual_plots')
@@ -120,13 +122,19 @@ def run_scan_array(obj, config, array_index):
     if config.get('create_ensemble_plots', True):
         ensemble.visualize(str(output_dir), individual_plots=False, ensemble_plots=True)
 
-    # Save results
+    # Save results - IMPORTANT: Don't save the ensemble object directly
+    # as it contains unpickleable recreated functions
     results_file = output_dir / "ensemble_results.pkl"
+
+    # Clear functions before pickling to avoid issues
+    results_data = {
+        'results': ensemble.results,  # Just the simulation results
+        'analysis': ensemble_analysis,  # Just the analysis data
+        'params': params,  # Parameters for this point
+    }
+
     with open(results_file, 'wb') as f:
-        pickle.dump({
-            'ensemble': ensemble,
-            'analysis': ensemble_analysis
-        }, f)
+        pickle.dump(results_data, f)
 
     # Save completion marker
     marker_file = output_dir / "completed.marker"
@@ -232,12 +240,13 @@ def main():
     """Main entry point for runner script."""
     # Parse command line arguments
     if len(sys.argv) < 3:
-        print("Usage: runner.py <pickle_file> <config_file> [array_index]")
+        print("Usage: runner.py <pickle_file> <config_file> [array_index] [env_file]")
         sys.exit(1)
 
     pickle_file = Path(sys.argv[1])
     config_file = Path(sys.argv[2])
     array_index = int(sys.argv[3]) if len(sys.argv) > 3 else None
+    env_file = Path(sys.argv[4]) if len(sys.argv) > 4 else None
 
     # Log execution info
     print(f"{'='*60}")
@@ -250,20 +259,41 @@ def main():
     print(f"Pickle file: {pickle_file}")
     print(f"Config file: {config_file}")
     print(f"Array index: {array_index}")
+    print(f"Environment file: {env_file if env_file else 'None'}")
     print(f"{'='*60}")
 
     try:
+        # IMPORTANT: Load environment FIRST, before loading pickle
+        # This ensures functions are available when unpickling
+        if env_file and env_file.exists():
+            print("\nLoading environment before unpickling...")
+            from runner_env import _env_loader, RECREATED_FUNCTIONS
+
+            # Force reload of environment
+            _env_loader.load_from_file(env_file)
+
+            # Make recreated functions available in __main__ namespace
+            # This is crucial for unpickling to work
+            import __main__
+            for name, func in _env_loader.recreated_functions.items():
+                setattr(__main__, name, func)
+                print(f"  Added {name} to __main__")
+
         # Load configuration
         print("\nLoading configuration...")
         with open(config_file, 'r') as f:
             config = json.load(f)
         print(f"Configuration type: {config['type']}")
 
-        # Load pickled object
+        # NOW load pickled object - functions should be available
         print("\nLoading pickled object...")
         with open(pickle_file, 'rb') as f:
             obj = pickle.load(f)
         print("Object loaded successfully")
+
+        # Apply captured environment updates to the object
+        # This updates the object's function references to use the recreated versions
+        update_object_functions(obj)
 
         # Determine object type and run appropriately
         obj_type = config['type']
