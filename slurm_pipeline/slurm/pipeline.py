@@ -61,6 +61,38 @@ class SlurmPipeline:
         self.monitor = SlurmMonitor(check_interval=monitor_interval, job_tracker=self.job_tracker if track_jobs else None)
         self.runner_script = None
 
+    def _normalize_output_dir(self, output_dir: Optional[str], default_subdir: str) -> str:
+        """
+        Normalize output directory path.
+
+        If output_dir is:
+        - None: use nfs_work_dir/outputs/default_subdir
+        - Relative path: prepend nfs_work_dir/outputs/
+        - Absolute path: use as-is
+
+        Args:
+            output_dir: User-provided output directory
+            default_subdir: Default subdirectory name if output_dir is None
+
+        Returns:
+            Absolute path to output directory
+        """
+        if output_dir is None:
+            # Use default under NFS outputs
+            output_dir = str(self.nfs_work_dir / "outputs" / default_subdir)
+        else:
+            output_dir = os.path.expandvars(output_dir)
+
+            # Check if it's a relative path
+            if not os.path.isabs(output_dir):
+                # Prepend NFS outputs directory
+                output_dir = str(self.nfs_work_dir / "outputs" / output_dir)
+
+        # Ensure directory exists
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        return output_dir
+
     def _serialize_object(self, obj: Any, name: str) -> Path:
         """Serialize a pipeline object to NFS directory."""
         filepath = self.nfs_input_dir / f"{name}.pkl"
@@ -118,10 +150,8 @@ class SlurmPipeline:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = f"ensemble_{timestamp}"
 
-        # Set up output directory
-        if output_dir is None:
-            output_dir = str(self.nfs_work_dir / "outputs" / base_name)
-        output_dir = os.path.expandvars(output_dir)
+        # Normalize output directory
+        output_dir = self._normalize_output_dir(output_dir, base_name)
 
         # Prepare configuration
         config = {
@@ -240,10 +270,8 @@ class SlurmPipeline:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = f"scan_{timestamp}"
 
-        # Set up output directory
-        if output_dir is None:
-            output_dir = str(self.nfs_work_dir / "outputs" / base_name)
-        output_dir = os.path.expandvars(output_dir)
+        # Normalize output directory
+        output_dir = self._normalize_output_dir(output_dir, base_name)
 
         # Prepare configuration
         config = {
@@ -263,7 +291,6 @@ class SlurmPipeline:
             slurm_config.job_name = f"{base_name}_array"
             # Increase resources per job since each runs an ensemble
             slurm_config.cpus_per_task = min(n_simulations_per_point, 8)
-            #slurm_config.mem = "8G"
         else:
             slurm_config.cpus_per_task = kwargs.get('max_workers', 8)
             config['parallel'] = True
@@ -354,10 +381,8 @@ class SlurmPipeline:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         slurm_config.job_name = f"pipeline_{timestamp}"
 
-        # Set up output directory
-        if output_dir is None:
-            output_dir = str(self.nfs_work_dir / "outputs" / slurm_config.job_name)
-        output_dir = os.path.expandvars(output_dir)
+        # Normalize output directory
+        output_dir = self._normalize_output_dir(output_dir, slurm_config.job_name)
 
         # Update SLURM output directory
         slurm_config.slurm_output_dir = str(self.nfs_work_dir / "logs")

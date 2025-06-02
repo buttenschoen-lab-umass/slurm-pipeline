@@ -25,6 +25,7 @@ if __name__ == "__main__":
 
     # Use absolute imports
     from slurm_pipeline.slurm import SlurmConfig, SlurmPipeline
+    from slurm_pipeline.slurm.debug_utils import diagnose_missing_results, quick_check
     from slurm_pipeline.core import Ensemble, ParameterScan, SimulationPipeline
     from slurm_pipeline.tests.test_models import (
         TestModel,
@@ -36,6 +37,7 @@ if __name__ == "__main__":
 else:
     # Module execution - use relative imports
     from ..slurm import SlurmConfig, SlurmPipeline
+    from ..slurm.debug_utils import diagnose_missing_results, quick_check
     from ..core import Ensemble, ParameterScan, SimulationPipeline
     from .test_models import (
         TestModel,
@@ -48,20 +50,66 @@ else:
 
 def clean_test_directories():
     """Clean up test directories."""
-    dirs_to_clean = ['slurm_traces', 'test_results', 'slurm_work']
-    for dir_name in dirs_to_clean:
-        if Path(dir_name).exists():
-            shutil.rmtree(dir_name)
-    print("Cleaned test directories")
+    # Clean local trace directory
+    if Path('slurm_traces').exists():
+        shutil.rmtree('slurm_traces')
+
+    # Note: We don't clean the NFS test_results directory here
+    # as it may contain results we want to inspect
+    print("Cleaned local trace directories")
 
 
-def analyze_traces(trace_dir="slurm_traces"):
-    """Analyze execution traces to verify distribution."""
+def analyze_traces(trace_dir="slurm_traces", nfs_outputs=None):
+    """
+    Analyze execution traces to verify distribution.
+
+    Args:
+        trace_dir: Local directory with trace files
+        nfs_outputs: NFS outputs directory to check for traces
+    """
+    # First check local traces
     trace_path = Path(trace_dir)
-    if not trace_path.exists():
-        print(f"No traces found in {trace_dir}")
-        return
+    traces_found = False
 
+    if trace_path.exists():
+        print(f"Checking local traces in {trace_dir}")
+        traces = analyze_trace_directory(trace_path)
+        if any(traces.values()):
+            traces_found = True
+            print_trace_analysis(traces)
+    else:
+        print(f"No local traces found in {trace_dir}")
+
+    # Then check NFS directory if provided
+    if nfs_outputs:
+        nfs_trace_path = Path(nfs_outputs) / "slurm_traces"
+        if nfs_trace_path.exists():
+            print(f"\nChecking NFS traces in {nfs_trace_path}")
+            nfs_traces = analyze_trace_directory(nfs_trace_path)
+            if any(nfs_traces.values()):
+                traces_found = True
+                print_trace_analysis(nfs_traces)
+
+        # Also check for traces in output directories
+        for output_dir in Path(nfs_outputs).glob("test_results/*"):
+            if output_dir.is_dir():
+                trace_subdir = output_dir / "slurm_traces"
+                if trace_subdir.exists():
+                    print(f"\nChecking traces in {trace_subdir}")
+                    sub_traces = analyze_trace_directory(trace_subdir)
+                    if any(sub_traces.values()):
+                        traces_found = True
+                        print_trace_analysis(sub_traces)
+
+    if not traces_found:
+        print("\nNo execution traces found anywhere!")
+        print("This might indicate the jobs didn't run or trace writing is disabled.")
+
+    return traces_found
+
+
+def analyze_trace_directory(trace_path: Path) -> dict:
+    """Analyze traces in a specific directory."""
     traces = {
         'simulations': [],
         'analyses': [],
@@ -86,7 +134,11 @@ def analyze_traces(trace_dir="slurm_traces"):
         elif trace_file.name.startswith('scan_'):
             traces['scans'].append(data)
 
-    # Analyze simulation distribution
+    return traces
+
+
+def print_trace_analysis(traces: dict):
+    """Print analysis of trace data."""
     print(f"\n{'='*60}")
     print("EXECUTION TRACE ANALYSIS")
     print(f"{'='*60}")
@@ -122,14 +174,13 @@ def analyze_traces(trace_dir="slurm_traces"):
     # Check timing
     if traces['simulations']:
         compute_times = [s.get('actual_compute_time', 0) for s in traces['simulations']]
-        print(f"\nCompute times:")
-        print(f"  Mean: {sum(compute_times)/len(compute_times):.2f}s")
-        print(f"  Min: {min(compute_times):.2f}s")
-        print(f"  Max: {max(compute_times):.2f}s")
+        if compute_times:
+            print(f"\nCompute times:")
+            print(f"  Mean: {sum(compute_times)/len(compute_times):.2f}s")
+            print(f"  Min: {min(compute_times):.2f}s")
+            print(f"  Max: {max(compute_times):.2f}s")
 
     print(f"{'='*60}\n")
-
-    return traces
 
 
 def test_single_simulation(work_time=5.0):
@@ -219,6 +270,12 @@ def test_ensemble_array_jobs(n_sims=20, sims_per_job=5, work_time=10.0):
 
     print(f"\nJob completed with status: {result['status']}")
 
+    # Show where output was written
+    print(f"Output directory: {result['output_dir']}")
+
+    # Quick check of results
+    quick_check(result['job_id'], result['output_dir'])
+
     if 'analysis' in result:
         print("\nEnsemble analysis results:")
         analysis = result['analysis']
@@ -228,6 +285,10 @@ def test_ensemble_array_jobs(n_sims=20, sims_per_job=5, work_time=10.0):
             print(f"  Unique hosts: {exec_info['unique_hosts']}")
             print(f"  Unique jobs: {exec_info['unique_jobs']}")
             print(f"  Ensemble mean: {exec_info.get('ensemble_mean', 'N/A')}")
+    else:
+        # If no analysis, diagnose why
+        print("\nNo analysis found - diagnosing...")
+        diagnose_missing_results(result)
 
     return result
 
@@ -281,6 +342,12 @@ def test_parameter_scan(work_time=5.0):
 
     print(f"\nJob completed with status: {result['status']}")
 
+    # Show where output was written
+    print(f"Output directory: {result['output_dir']}")
+
+    # Quick check of results
+    quick_check(result['job_id'], result['output_dir'])
+
     if 'analysis' in result:
         print("\nScan analysis results:")
         analysis = result['analysis']
@@ -289,6 +356,10 @@ def test_parameter_scan(work_time=5.0):
             print("  Ensemble means by parameter:")
             for param_str, mean_val in analysis['ensemble_means'].items():
                 print(f"    {param_str}: {mean_val:.4f}")
+    else:
+        # If no analysis, diagnose why
+        print("\nNo analysis found - diagnosing...")
+        diagnose_missing_results(result)
 
     return result
 
@@ -411,6 +482,11 @@ def run_all_tests(quick=False):
     # Clean up from previous runs
     clean_test_directories()
 
+    # Create SlurmPipeline to get NFS directory
+    slurm = SlurmPipeline()
+    nfs_outputs = str(slurm.nfs_work_dir / "outputs")
+    print(f"NFS outputs directory: {nfs_outputs}")
+
     # Adjust parameters for quick testing
     if quick:
         work_time = 2.0
@@ -446,7 +522,7 @@ def run_all_tests(quick=False):
     print("\n" + "="*60)
     print("ANALYZING EXECUTION TRACES")
     print("="*60)
-    traces = analyze_traces()
+    traces_found = analyze_traces(nfs_outputs=nfs_outputs)
 
     # Summary
     print("\n" + "="*60)
@@ -456,6 +532,8 @@ def run_all_tests(quick=False):
     for test_name, result in results.items():
         if isinstance(result, dict) and 'status' in result:
             print(f"{test_name}: {result['status']}")
+            if 'output_dir' in result:
+                print(f"  Output: {result['output_dir']}")
         elif isinstance(result, list):
             # Batch results
             statuses = [r.get('status', 'unknown') for r in result]
@@ -465,7 +543,24 @@ def run_all_tests(quick=False):
 
     print(f"\nEnd time: {datetime.now()}")
 
-    return results, traces
+    # List all test output directories
+    print(f"\n" + "="*60)
+    print("TEST OUTPUT LOCATIONS")
+    print("="*60)
+    test_results_dir = Path(nfs_outputs) / "test_results"
+    if test_results_dir.exists():
+        print(f"Test results in: {test_results_dir}")
+        for item in sorted(test_results_dir.iterdir()):
+            if item.is_dir():
+                files = list(item.rglob("*"))
+                markers = list(item.glob("**/*.marker"))
+                pkls = list(item.glob("**/*.pkl"))
+                print(f"  {item.name}/")
+                print(f"    Total files: {len(files)}, Markers: {len(markers)}, PKLs: {len(pkls)}")
+    else:
+        print("No test results directory found!")
+
+    return results, traces_found
 
 
 def main():
@@ -483,7 +578,9 @@ def main():
     args = parser.parse_args()
 
     if args.analyze_only:
-        analyze_traces()
+        slurm = SlurmPipeline()
+        nfs_outputs = str(slurm.nfs_work_dir / "outputs")
+        analyze_traces(nfs_outputs=nfs_outputs)
     elif args.test == 'all':
         run_all_tests(quick=args.quick)
     else:
@@ -500,7 +597,9 @@ def main():
             test_restart_monitoring()
 
         # Always analyze traces after individual test
-        analyze_traces()
+        slurm = SlurmPipeline()
+        nfs_outputs = str(slurm.nfs_work_dir / "outputs")
+        analyze_traces(nfs_outputs=nfs_outputs)
 
 
 if __name__ == "__main__":
