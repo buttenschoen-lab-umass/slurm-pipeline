@@ -23,14 +23,12 @@ class SlurmPipeline:
 
     def __init__(self,
                  nfs_work_dir: str = "/home/adrs0061/cluster/slurm_pipeline",
-                 local_work_dir: Optional[str] = None,
                  monitor_interval: int = 10):
         """
         Initialize SLURM pipeline wrapper.
 
         Args:
             nfs_work_dir: NFS directory accessible from all nodes (can use $USER)
-            local_work_dir: Optional local directory for temporary files
             monitor_interval: Seconds between status checks for monitoring
         """
         # Expand environment variables in paths
@@ -44,13 +42,9 @@ class SlurmPipeline:
         self.nfs_scripts_dir = self.nfs_work_dir / "scripts"
         self.nfs_scripts_dir.mkdir(exist_ok=True)
 
-        # Local work directory (optional, for logs etc)
-        if local_work_dir:
-            self.local_work_dir = Path(local_work_dir)
-            self.local_work_dir.mkdir(exist_ok=True, parents=True)
-        else:
-            self.local_work_dir = Path("./slurm_work")
-            self.local_work_dir.mkdir(exist_ok=True, parents=True)
+        # Store submission info in NFS too
+        self.submission_info_dir = self.nfs_work_dir / "submissions"
+        self.submission_info_dir.mkdir(exist_ok=True)
 
         self.monitor = SlurmMonitor(check_interval=monitor_interval)
         self.runner_script = None
@@ -151,26 +145,12 @@ def run_scan_array(obj, config, array_index):
 
     # Import Ensemble class - try multiple strategies
     try:
-        # Strategy 1: Import from the model's package
-        model_module = obj.model_type.__module__
-        package_parts = model_module.split('.')
-
-        # Try importing from same package as model
-        if len(package_parts) > 1:
-            package_name = package_parts[0]
-            import importlib
-            ensemble_module = importlib.import_module(f"{package_name}.ensemble")
-            Ensemble = ensemble_module.Ensemble
-        else:
-            raise ImportError("Try next strategy")
+        # Strategy 2: Direct import
+        from slurm_pipeline import Ensemble
     except:
-        try:
-            # Strategy 2: Direct import
-            from ensemble import Ensemble
-        except:
-            # Strategy 3: Add parent directory to path and try again
-            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            from ensemble import Ensemble
+        # Strategy 3: Add parent directory to path and try again
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from slurm_pipeline import Ensemble
 
     # Create ensemble for this parameter point
     ensemble = Ensemble(
@@ -720,7 +700,7 @@ if __name__ == "__main__":
 
         if result.returncode != 0:
             # Save failed submission info
-            info_file = self.local_work_dir / f"submission_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            info_file = self.submission_info_dir / f"submission_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             with open(info_file, 'w') as f:
                 json.dump(submission_info, f, indent=2)
 
@@ -745,7 +725,7 @@ if __name__ == "__main__":
 
         # Save successful submission info
         submission_info['job_id'] = job_id
-        info_file = self.local_work_dir / f"submission_{job_id}.json"
+        info_file = self.submission_info_dir / f"submission_{job_id}.json"
         with open(info_file, 'w') as f:
             json.dump(submission_info, f, indent=2)
 

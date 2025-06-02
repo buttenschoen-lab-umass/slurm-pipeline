@@ -16,22 +16,34 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 
-# Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Handle imports based on how the script is run
+if __name__ == "__main__":
+    # Direct execution - add parent directories to path
+    current_dir = Path(__file__).resolve().parent
+    package_dir = current_dir.parent.parent  # Go up to package root
+    sys.path.insert(0, str(package_dir))
 
-from slurm_pipeline.slurm import SlurmConfig
-from slurm_pipeline.slurm import SlurmPipeline
-from slurm_pipeline.core import Ensemble
-from slurm_pipeline.core import ParameterScan
-from slurm_pipeline.core import SimulationPipeline
-
-from .test_models import (
-    TestModel,
-    test_analysis_functions,
-    test_plot_functions,
-    test_ensemble_analysis,
-    test_scan_analysis
-)
+    # Use absolute imports
+    from slurm_pipeline.slurm import SlurmConfig, SlurmPipeline
+    from slurm_pipeline.core import Ensemble, ParameterScan, SimulationPipeline
+    from slurm_pipeline.tests.test_models import (
+        TestModel,
+        test_analysis_functions,
+        test_plot_functions,
+        test_ensemble_analysis,
+        test_scan_analysis
+    )
+else:
+    # Module execution - use relative imports
+    from ..slurm import SlurmConfig, SlurmPipeline
+    from ..core import Ensemble, ParameterScan, SimulationPipeline
+    from .test_models import (
+        TestModel,
+        test_analysis_functions,
+        test_plot_functions,
+        test_ensemble_analysis,
+        test_scan_analysis
+    )
 
 
 def clean_test_directories():
@@ -129,7 +141,7 @@ def test_single_simulation(work_time=5.0):
     # Create pipeline
     pipeline = SimulationPipeline(
         TestModel,
-        params={'work_time': work_time, 'test_param': 1.5},
+        params={'work_time': work_time, 'test_param': 1.5, 'write_trace': True},
         integrator_params={'dt': 0.5},
         analysis_functions=test_analysis_functions,
         plot_functions=test_plot_functions
@@ -176,7 +188,7 @@ def test_ensemble_array_jobs(n_sims=20, sims_per_job=5, work_time=10.0):
     # Create ensemble
     ensemble = Ensemble(
         TestModel,
-        params={'work_time': work_time, 'test_param': 2.0},
+        params={'work_time': work_time, 'test_param': 2.0, 'write_trace': True},
         integrator_params={'dt': 0.5},
         analysis_functions=test_analysis_functions,
         plot_functions=test_plot_functions,
@@ -237,7 +249,7 @@ def test_parameter_scan(work_time=5.0):
     # Create scan
     scan = ParameterScan(
         TestModel,
-        base_params={'work_time': work_time},
+        base_params={'work_time': work_time, 'write_trace': True},
         integrator_params={'dt': 0.5},
         scan_params=scan_params,
         analysis_functions=test_analysis_functions,
@@ -292,35 +304,46 @@ def test_batch_submission(work_time=5.0):
     for temp in [0.5, 1.0, 2.0]:
         ens = Ensemble(
             TestModel,
-            params={'work_time': work_time, 'test_param': temp},
+            params={'work_time': work_time, 'test_param': temp, 'write_trace': True},
             integrator_params={'dt': 0.5},
             analysis_functions=test_analysis_functions,
             ensemble_analysis_functions=test_ensemble_analysis
         )
         ensembles.append(ens)
 
-    # Prepare batch submissions
-    submissions = [
-        ('ensemble', {
-            'ensemble': ens,
-            'n_simulations': 15,
-            'T': 10.0,
-            'array_jobs': True,
-            'sims_per_job': 5,
-            'output_dir': f"test_results/batch_temp_{ens.params['test_param']}",
-            'slurm_config': SlurmConfig(
+    # Submit individually but monitor together
+    slurm = SlurmPipeline()
+    submissions = []
+
+    for ens in ensembles:
+        submission = slurm.submit_ensemble(
+            ens,
+            n_simulations=15,
+            T=10.0,
+            array_jobs=True,
+            sims_per_job=5,
+            output_dir=f"test_results/batch_temp_{ens.params['test_param']}",
+            slurm_config=SlurmConfig(
                 job_name=f"batch_temp_{ens.params['test_param']}",
                 time="00:15:00"
-            )
-        })
-        for ens in ensembles
-    ]
+            ),
+            wait_for_completion=False  # Don't wait yet
+        )
+        submissions.append(submission)
 
-    print(f"Submitting {len(submissions)} ensemble jobs...")
+    print(f"Submitted {len(submissions)} ensemble jobs")
 
-    # Submit and monitor
-    slurm = SlurmPipeline()
-    results = slurm.batch_submit_and_monitor(submissions, show_progress=True)
+    # Monitor all jobs together
+    job_infos = slurm.monitor.monitor_multiple(submissions, show_progress=True)
+
+    # Collect results
+    results = []
+    for i, (submission, job_info) in enumerate(zip(submissions, job_infos)):
+        if job_info.state.value == "COMPLETED":
+            result = slurm.monitor_and_collect(submission, show_progress=False)
+            results.append(result)
+        else:
+            results.append({'status': job_info.state.value})
 
     print("\nBatch results:")
     for i, result in enumerate(results):
@@ -343,7 +366,7 @@ def test_restart_monitoring():
     # First, submit a job without waiting
     ensemble = Ensemble(
         TestModel,
-        params={'work_time': 30.0, 'test_param': 3.0},
+        params={'work_time': 30.0, 'test_param': 3.0, 'write_trace': True},
         integrator_params={'dt': 0.5},
         analysis_functions=test_analysis_functions
     )
@@ -445,7 +468,8 @@ def run_all_tests(quick=False):
     return results, traces
 
 
-if __name__ == "__main__":
+def main():
+    """Main entry point for command-line execution."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Test SLURM pipeline")
@@ -477,3 +501,7 @@ if __name__ == "__main__":
 
         # Always analyze traces after individual test
         analyze_traces()
+
+
+if __name__ == "__main__":
+    main()

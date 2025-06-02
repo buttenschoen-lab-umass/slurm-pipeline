@@ -118,7 +118,7 @@ class TestModel:
         return t, solution
 
 
-def analyze_test_execution(time, solution, model):
+def analyze_test_execution(solution, model):
     """Analysis function that tracks execution."""
     analysis_info = {
         'hostname': socket.gethostname(),
@@ -143,7 +143,7 @@ def analyze_test_execution(time, solution, model):
     return analysis_info
 
 
-def plot_test_result(time, solution, model, save_path):
+def plot_test_result(time_arr, solution, model, save_path):
     """Simple plot function that tracks execution."""
     import matplotlib.pyplot as plt
 
@@ -162,7 +162,7 @@ def plot_test_result(time, solution, model, save_path):
 
     # Plot a few trajectories
     for i in range(min(5, solution.shape[1])):
-        ax.plot(time, solution[:, i], alpha=0.7)
+        ax.plot(time_arr, solution[:, i], alpha=0.7)
 
     ax.set_xlabel('Time')
     ax.set_ylabel('Value')
