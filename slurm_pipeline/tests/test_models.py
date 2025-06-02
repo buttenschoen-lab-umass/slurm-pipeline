@@ -118,7 +118,7 @@ class TestModel:
         return t, solution
 
 
-def analyze_test_execution(solution, model):
+def analyze_test_execution(time_arr, solution, model):
     """Analysis function that tracks execution."""
     analysis_info = {
         'hostname': socket.gethostname(),

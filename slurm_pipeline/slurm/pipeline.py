@@ -1,7 +1,8 @@
 """
 Main SLURM pipeline class for submitting and managing simulation jobs.
 
-This version properly handles NFS directories for cluster-wide access.
+This version properly handles NFS directories for cluster-wide access and includes
+automatic job tracking and cancellation functionality.
 """
 
 import os
@@ -16,20 +17,24 @@ from datetime import datetime
 
 from .config import SlurmConfig
 from .monitor import SlurmMonitor, JobInfo, JobState
+from .job_tracker import JobTracker
+from .runner_generator import get_runner_script_content
 
 
 class SlurmPipeline:
-    """Wrapper to run pipeline objects on SLURM."""
+    """Wrapper to run pipeline objects on SLURM with automatic job tracking."""
 
     def __init__(self,
                  nfs_work_dir: str = "/home/adrs0061/cluster/slurm_pipeline",
-                 monitor_interval: int = 10):
+                 monitor_interval: int = 10,
+                 track_jobs: bool = True):
         """
         Initialize SLURM pipeline wrapper.
 
         Args:
             nfs_work_dir: NFS directory accessible from all nodes (can use $USER)
             monitor_interval: Seconds between status checks for monitoring
+            track_jobs: Whether to track and auto-cancel jobs on exit
         """
         # Expand environment variables in paths
         self.nfs_work_dir = Path(os.path.expandvars(nfs_work_dir))
@@ -46,7 +51,14 @@ class SlurmPipeline:
         self.submission_info_dir = self.nfs_work_dir / "submissions"
         self.submission_info_dir.mkdir(exist_ok=True)
 
-        self.monitor = SlurmMonitor(check_interval=monitor_interval)
+        # Job tracking
+        self.track_jobs = track_jobs
+        if track_jobs:
+            self.job_tracker = JobTracker()
+        else:
+            self.job_tracker = None
+
+        self.monitor = SlurmMonitor(check_interval=monitor_interval, job_tracker=self.job_tracker if track_jobs else None)
         self.runner_script = None
 
     def _serialize_object(self, obj: Any, name: str) -> Path:
@@ -61,272 +73,10 @@ class SlurmPipeline:
         if self.runner_script is None:
             runner_path = self.nfs_scripts_dir / "runner.py"
 
-            # Write the runner script content
-            runner_content = '''#!/usr/bin/env python
-"""
-SLURM runner script for simulation pipeline objects.
-This script is executed on compute nodes to run serialized pipeline objects.
-"""
+            # Get the runner script content
+            runner_content = get_runner_script_content()
 
-import sys
-import pickle
-import json
-from pathlib import Path
-import traceback
-import os
-
-
-def run_ensemble_array(obj, config, array_index):
-    """Run a chunk of ensemble simulations."""
-    n_sims = config['n_simulations']
-    sims_per_job = config.get('sims_per_job', 1)
-    start_idx = array_index * sims_per_job
-    end_idx = min(start_idx + sims_per_job, n_sims)
-
-    print(f"Array task {array_index}: Running simulations {start_idx}-{end_idx-1}")
-
-    # Update starting_sim_id for this chunk
-    obj.starting_sim_id = start_idx
-
-    # Run subset of simulations
-    obj.run(
-        n_simulations=end_idx - start_idx,
-        T=config['T'],
-        parallel=config.get('parallel', False),
-        output_dir=config.get('output_dir'),
-        create_individual_plots=config.get('create_individual_plots', True),
-        create_individual_animations=config.get('create_individual_animations', True),
-        max_individual_plots=config.get('max_individual_plots')
-    )
-
-    # Save results for this chunk
-    output_path = Path(config['output_dir'])
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    results_file = output_path / f"results_chunk_{array_index}.pkl"
-    with open(results_file, 'wb') as f:
-        pickle.dump(obj.results, f)
-
-    # Save completion marker
-    marker_file = output_path / f"completed_chunk_{array_index}.marker"
-    marker_file.touch()
-
-    print(f"Array task {array_index}: Completed successfully")
-
-
-def run_scan_array(obj, config, array_index):
-    """Run a single parameter point from scan."""
-    import itertools
-
-    # Reconstruct parameter combinations
-    param_names = list(config['scan_params'].keys())
-    param_values = [config['scan_params'][k] for k in param_names]
-    param_combinations = list(itertools.product(*param_values))
-
-    if array_index >= len(param_combinations):
-        print(f"Array index {array_index} exceeds number of parameter combinations")
-        return
-
-    # Get parameter combination for this job
-    param_combination = param_combinations[array_index]
-
-    print(f"Array task {array_index}: Running parameter point {dict(zip(param_names, param_combination))}")
-
-    # Update base parameters
-    params = config['base_params'].copy()
-    for name, value in zip(param_names, param_combination):
-        params[name] = value
-
-    # Create output directory for this parameter point
-    param_str = "_".join([f"{k}_{v:.3g}" if isinstance(v, (int, float)) else f"{k}_{v}"
-                        for k, v in zip(param_names, param_combination)])
-    output_dir = Path(config['output_dir']) / param_str
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Import Ensemble class - try multiple strategies
-    try:
-        # Strategy 2: Direct import
-        from slurm_pipeline import Ensemble
-    except:
-        # Strategy 3: Add parent directory to path and try again
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from slurm_pipeline import Ensemble
-
-    # Create ensemble for this parameter point
-    ensemble = Ensemble(
-        obj.model_type, params, obj.integrator_params,
-        obj.analysis_functions, obj.plot_functions, obj.animation_function,
-        obj.ensemble_analysis_functions, obj.ensemble_plot_functions
-    )
-
-    # Run ensemble
-    ensemble.run(
-        n_simulations=config['n_simulations_per_point'],
-        T=config['T'],
-        output_dir=str(output_dir),
-        parallel=config.get('parallel', False),
-        create_individual_plots=config.get('create_individual_plots', True),
-        create_individual_animations=config.get('create_individual_animations', True),
-        max_individual_plots=config.get('max_individual_plots')
-    )
-
-    # Run ensemble analysis
-    ensemble_analysis = ensemble.analyze()
-
-    # Create ensemble visualizations if requested
-    if config.get('create_ensemble_plots', True):
-        ensemble.visualize(str(output_dir), individual_plots=False, ensemble_plots=True)
-
-    # Save results
-    results_file = output_dir / "ensemble_results.pkl"
-    with open(results_file, 'wb') as f:
-        pickle.dump({
-            'ensemble': ensemble,
-            'analysis': ensemble_analysis
-        }, f)
-
-    # Save completion marker
-    marker_file = output_dir / "completed.marker"
-    marker_file.touch()
-
-    print(f"Array task {array_index}: Completed parameter point successfully")
-
-
-def main():
-    # Parse command line arguments
-    if len(sys.argv) < 3:
-        print("Usage: runner.py <pickle_file> <config_file> [array_index]")
-        sys.exit(1)
-
-    pickle_file = Path(sys.argv[1])
-    config_file = Path(sys.argv[2])
-    array_index = int(sys.argv[3]) if len(sys.argv) > 3 else None
-
-    # Log execution info
-    print(f"Runner started on host: {os.uname().nodename}")
-    print(f"SLURM_JOB_ID: {os.environ.get('SLURM_JOB_ID', 'N/A')}")
-    print(f"SLURM_ARRAY_TASK_ID: {os.environ.get('SLURM_ARRAY_TASK_ID', 'N/A')}")
-
-    try:
-        # Load configuration
-        with open(config_file, 'r') as f:
-            config = json.load(f)
-
-        # Load pickled object
-        with open(pickle_file, 'rb') as f:
-            obj = pickle.load(f)
-
-        # Determine object type and run appropriately
-        obj_type = config['type']
-
-        if obj_type == 'ensemble':
-            if array_index is not None:
-                run_ensemble_array(obj, config, array_index)
-            else:
-                # Run complete ensemble with post-processing
-                print("Running complete ensemble")
-                obj.run(
-                    n_simulations=config['n_simulations'],
-                    T=config['T'],
-                    parallel=config.get('parallel', True),
-                    output_dir=config.get('output_dir'),
-                    create_individual_plots=config.get('create_individual_plots', True),
-                    create_individual_animations=config.get('create_individual_animations', True),
-                    max_individual_plots=config.get('max_individual_plots')
-                )
-
-                # Run analysis
-                ensemble_analysis = obj.analyze()
-
-                # Create visualizations
-                if config.get('output_dir') and config.get('create_ensemble_plots', True):
-                    obj.visualize(config['output_dir'],
-                                individual_plots=False,
-                                ensemble_plots=True)
-
-                # Save final results
-                if config.get('output_dir'):
-                    results_file = Path(config['output_dir']) / "ensemble_complete.pkl"
-                    with open(results_file, 'wb') as f:
-                        pickle.dump({
-                            'ensemble': obj,
-                            'analysis': ensemble_analysis,
-                            'results': obj.results
-                        }, f)
-
-        elif obj_type == 'parameter_scan':
-            if array_index is not None:
-                run_scan_array(obj, config, array_index)
-            else:
-                # Run complete parameter scan
-                print("Running complete parameter scan")
-                obj.run(
-                    n_simulations_per_point=config['n_simulations_per_point'],
-                    T=config['T'],
-                    parallel=config.get('parallel', True),
-                    parallel_mode=config.get('parallel_mode', 'auto'),
-                    output_dir=config.get('output_dir'),
-                    create_individual_plots=config.get('create_individual_plots', True),
-                    create_individual_animations=config.get('create_individual_animations', True),
-                    max_individual_plots=config.get('max_individual_plots')
-                )
-
-                # Run scan-level analysis
-                scan_analysis = obj.analyze()
-
-                # Create scan-level visualizations
-                if config.get('output_dir'):
-                    obj.visualize(config['output_dir'],
-                                create_ensemble_plots=config.get('create_ensemble_plots', True))
-
-                # Save final results
-                if config.get('output_dir'):
-                    results_file = Path(config['output_dir']) / "scan_complete.pkl"
-                    with open(results_file, 'wb') as f:
-                        pickle.dump({
-                            'scan': obj,
-                            'analysis': scan_analysis,
-                            'results': obj.scan_results
-                        }, f)
-
-        elif obj_type == 'pipeline':
-            # Run single simulation pipeline
-            print("Running single simulation pipeline")
-            result = obj.run(
-                T=config['T'],
-                initial_state=config.get('initial_state'),
-                progress=config.get('progress', False)
-            )
-
-            # Analyze
-            result = obj.analyze(result)
-
-            # Visualize
-            if config.get('output_dir'):
-                result = obj.visualize(
-                    result,
-                    config['output_dir'],
-                    plots=config.get('create_plots', True),
-                    animation=config.get('create_animation', True)
-                )
-
-                # Save data
-                if config.get('save_data', True) and obj.save_function:
-                    data_path = Path(config['output_dir']) / "simulation_data.npz"
-                    obj.save(result, str(data_path))
-
-        print("Job completed successfully")
-
-    except Exception as e:
-        print(f"Job failed with error: {e}")
-        traceback.print_exc()
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
-'''
-
+            # Write to file
             with open(runner_path, 'w') as f:
                 f.write(runner_content)
             runner_path.chmod(0o755)
@@ -698,6 +448,19 @@ if __name__ == "__main__":
             'cwd': str(script_path.parent)
         }
 
+        # Extract job name from script if available
+        job_name = None
+        if script_path.exists():
+            with open(script_path, 'r') as f:
+                script_content = f.read()
+
+            for line in script_content.split('\n'):
+                if line.startswith('#SBATCH --job-name='):
+                    job_name = line.split('=')[1].strip()
+                    break
+
+            submission_info['job_name'] = job_name
+
         if result.returncode != 0:
             # Save failed submission info
             info_file = self.submission_info_dir / f"submission_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -722,6 +485,10 @@ if __name__ == "__main__":
             raise RuntimeError(error_msg) from e
 
         print(f"Submitted job: {job_id}")
+
+        # Track job if enabled
+        if self.job_tracker:
+            self.job_tracker.add_job(job_id, job_name)
 
         # Save successful submission info
         submission_info['job_id'] = job_id
@@ -808,6 +575,12 @@ if __name__ == "__main__":
 
         submission_result['job_info'] = job_info
         submission_result['status'] = job_info.state.value
+
+        # Update tracker if job completed
+        job_id = submission_result['job_id']
+        if self.track_jobs and job_info.state in [JobState.COMPLETED, JobState.FAILED,
+                                                   JobState.CANCELLED, JobState.TIMEOUT]:
+            self.job_tracker.complete_job(job_id)
 
         return submission_result
 
@@ -901,3 +674,59 @@ if __name__ == "__main__":
             print(f"Warning: Missing parameter points: {missing_points}")
 
         return scan_results
+
+    def cancel_job(self, job_id: str, reason: str = "Manual cancellation") -> bool:
+        """
+        Cancel a specific SLURM job.
+
+        Args:
+            job_id: SLURM job ID to cancel
+            reason: Reason for cancellation
+
+        Returns:
+            True if cancellation was successful
+        """
+        if self.job_tracker:
+            return self.job_tracker.cancel_job(job_id, reason)
+        else:
+            # Direct cancellation without tracking
+            result = subprocess.run(['scancel', job_id], capture_output=True, text=True)
+            return result.returncode == 0
+
+    def cancel_all_active_jobs(self) -> Dict[str, int]:
+        """
+        Cancel all currently active jobs.
+
+        Returns:
+            Dictionary with cancellation statistics
+        """
+        if self.job_tracker:
+            return self.job_tracker.cancel_all_active()
+        else:
+            return {'cancelled': 0, 'failed': 0, 'already_done': 0}
+
+    def get_tracking_status(self) -> Dict[str, Any]:
+        """
+        Get current job tracking status.
+
+        Returns:
+            Dictionary with tracking information
+        """
+        if self.job_tracker:
+            return self.job_tracker.get_status()
+        return {'tracking_enabled': False}
+
+    def disable_auto_cancel(self):
+        """Disable automatic job cancellation on script exit."""
+        if self.job_tracker:
+            self.job_tracker.disable_auto_cancel()
+
+    def enable_auto_cancel(self):
+        """Enable automatic job cancellation on script exit."""
+        if self.job_tracker:
+            self.job_tracker.enable_auto_cancel()
+
+    def set_tracking_verbose(self, verbose: bool):
+        """Set verbosity for job tracking messages."""
+        if self.job_tracker:
+            self.job_tracker.set_verbose(verbose)
