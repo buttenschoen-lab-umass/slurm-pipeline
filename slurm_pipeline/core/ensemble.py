@@ -33,17 +33,19 @@ def _run_single_simulation(model_type: type,
     result = pipeline.run(T, progress=False)
     result = pipeline.analyze(result)
 
+    # Output directory
+    sim_output_dir = os.path.join(output_dir, f"simulation_{sim_index:03d}")
+
     # Create visualizations if requested
     if output_dir and (create_plots or create_animation):
-        sim_output_dir = os.path.join(output_dir, f"simulation_{sim_index:03d}")
         result = pipeline.visualize(result, sim_output_dir,
                                   plots=create_plots,
                                   animation=create_animation)
 
-        # Save simulation data using model's save method
-        if hasattr(model_type, 'save_trajectory'):
-            data_path = os.path.join(sim_output_dir, "simulation_data.npz")
-            pipeline.save(result, data_path)
+    # Save simulation data using model's save method
+    if output_dir and hasattr(model_type, 'save_trajectory'):
+        data_path = os.path.join(sim_output_dir, "simulation_data.npz")
+        pipeline.save(result, data_path)
 
     return result
 

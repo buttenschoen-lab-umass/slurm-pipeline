@@ -93,7 +93,7 @@ def run_ensemble_for_parameter_point(obj, config, array_index=None):
     # Save ensemble results for later collection
     results_file = output_dir / "ensemble_results.pkl"
     results_data = {
-        'results': ensemble.results,
+        # 'results': ensemble.results, Each pipeline saves its sim data.
         'analysis': ensemble_analysis,
         'params': params,
     }
