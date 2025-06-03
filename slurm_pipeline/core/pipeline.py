@@ -18,12 +18,6 @@ class SimulationResult:
 
 
 class SimulationPipeline:
-    """
-    Pipeline for a single simulation: run, analyze, visualize.
-
-    This is the basic building block - handles one simulation from start to finish.
-    """
-
     def __init__(self,
                  model_type: type,
                  params: Dict[str, Any],
@@ -31,21 +25,17 @@ class SimulationPipeline:
                  analysis_functions: Optional[Dict[str, Callable]] = None,
                  plot_functions: Optional[Dict[str, Callable]] = None,
                  animation_function: Optional[Callable] = None,
-                 save_function: Optional[Callable] = None,
-                 load_function: Optional[Callable] = None,
                  sim_id: int = 0):
         """
         Initialize pipeline for a single simulation.
 
         Args:
-            model_type: Model class to instantiate
+            model_type: Model class to instantiate (must have save_trajectory/load_trajectory methods)
             params: Model parameters
             integrator_params: Integration parameters (dt, etc.)
             analysis_functions: Dict of functions for analysis
             plot_functions: Dict of functions for plotting
             animation_function: Function for animation
-            save_function: Function to save data
-            load_function: Function to load data
             sim_id: Simulation ID (default: 0)
         """
         self.model_type = model_type
@@ -58,12 +48,36 @@ class SimulationPipeline:
         self.plot_functions = plot_functions or {}
         self.animation_function = animation_function
 
-        # I/O
-        self.save_function = save_function
-        self.load_function = load_function
-
         # Create model instance
         self.model = model_type(**params)
+
+    def save(self, result: SimulationResult, filepath: str) -> None:
+        """Save simulation data using model's save_trajectory method."""
+        if not hasattr(self.model_type, 'save_trajectory'):
+            raise AttributeError(
+                f"Model {self.model_type.__name__} must implement save_trajectory class method"
+            )
+
+        self.model_type.save_trajectory(
+            result.time, result.solution, result.params,
+            filepath, sim_id=result.sim_id
+        )
+
+    def load(self, filepath: str) -> SimulationResult:
+        """Load simulation data using model's load_trajectory method."""
+        if not hasattr(self.model_type, 'load_trajectory'):
+            raise AttributeError(
+                f"Model {self.model_type.__name__} must implement load_trajectory class method"
+            )
+
+        data = self.model_type.load_trajectory(filepath)
+
+        if isinstance(data, tuple) and len(data) == 4:
+            t, solution, params, sim_id = data
+        else:
+            raise ValueError(f"Unexpected data format from load_trajectory: {type(data)}")
+
+        return SimulationResult(time=t, solution=solution, params=params, sim_id=sim_id)
 
     def run(self,
             T: float = 50.0,
@@ -167,28 +181,6 @@ class SimulationPipeline:
 
         return result
 
-    def save(self, result: SimulationResult, filepath: str) -> None:
-        """Save simulation data."""
-        if self.save_function:
-            self.save_function(result.time, result.solution, result.params, filepath, sim_id=result.sim_id)
-
-    def load(self, filepath: str) -> SimulationResult:
-        """Load simulation data."""
-        if self.load_function:
-            data = self.load_function(filepath)
-            # Handle both old format (3-tuple) and new format (with sim_id)
-            if isinstance(data, tuple) and len(data) == 3:
-                t, solution, params = data
-                sim_id = 0  # Default for old format
-            elif isinstance(data, tuple) and len(data) == 4:
-                t, solution, params, sim_id = data
-            else:
-                raise ValueError(f"Unexpected data format from load function: {type(data)}")
-
-            return SimulationResult(time=t, solution=solution, params=params, sim_id=sim_id)
-        else:
-            raise ValueError("No load function provided")
-
     def run_complete(self,
                      T: float = 50.0,
                      initial_state: Optional[np.ndarray] = None,
@@ -197,8 +189,6 @@ class SimulationPipeline:
                      progress: bool = True) -> SimulationResult:
         """
         Run complete pipeline: simulate, analyze, visualize, save.
-
-        This is a convenience method that runs everything.
         """
         # Run simulation
         result = self.run(T, initial_state, progress)
@@ -211,8 +201,10 @@ class SimulationPipeline:
             result = self.visualize(result, output_dir)
 
             # Save data
-            if save_data and self.save_function:
+            if save_data:
                 data_path = os.path.join(output_dir, "simulation_data.npz")
                 self.save(result, data_path)
 
         return result
+
+

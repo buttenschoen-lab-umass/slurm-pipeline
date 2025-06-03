@@ -16,8 +16,6 @@ def _run_single_simulation(model_type: type,
                           analysis_functions: Optional[Dict[str, Callable]],
                           plot_functions: Optional[Dict[str, Callable]],
                           animation_function: Optional[Callable],
-                          save_function: Optional[Callable],
-                          load_function: Optional[Callable],
                           T: float,
                           sim_index: int,
                           output_dir: Optional[str] = None,
@@ -25,32 +23,12 @@ def _run_single_simulation(model_type: type,
                           create_animation: bool = True) -> SimulationResult:
     """
     Helper function to run a single simulation.
-    This is a module-level function so it can be pickled for multiprocessing.
-
-    Args:
-        model_type: Model class to instantiate
-        params: Model parameters
-        integrator_params: Integration parameters
-        analysis_functions: Analysis functions for individual sims
-        plot_functions: Plot functions for individual sims
-        animation_function: Animation function
-        save_function: Function to save data
-        load_function: Function to load data
-        T: Simulation time
-        sim_index: Index of this simulation (used as sim_id)
-        output_dir: Directory to save individual simulation outputs
-        create_plots: Whether to create plots for this simulation
-        create_animation: Whether to create animation for this simulation
-
-    Returns:
-        Analyzed SimulationResult with visualization
     """
     # Create pipeline with sim_index as sim_id
     pipeline = SimulationPipeline(
         model_type, params, integrator_params,
         analysis_functions, plot_functions, animation_function,
-        save_function, load_function,
-        sim_id=sim_index  # Pass sim_index as sim_id
+        sim_id=sim_index
     )
     result = pipeline.run(T, progress=False)
     result = pipeline.analyze(result)
@@ -61,6 +39,11 @@ def _run_single_simulation(model_type: type,
         result = pipeline.visualize(result, sim_output_dir,
                                   plots=create_plots,
                                   animation=create_animation)
+
+        # Save simulation data using model's save method
+        if hasattr(model_type, 'save_trajectory'):
+            data_path = os.path.join(sim_output_dir, "simulation_data.npz")
+            pipeline.save(result, data_path)
 
     return result
 
@@ -79,19 +62,16 @@ class Ensemble:
                  animation_function: Optional[Callable] = None,
                  ensemble_analysis_functions: Optional[Dict[str, Callable]] = None,
                  ensemble_plot_functions: Optional[Dict[str, Callable]] = None,
-                 save_function: Optional[Callable] = None,
-                 load_function: Optional[Callable] = None,
                  starting_sim_id: int = 0):
         """
         Initialize ensemble.
 
         Args:
-            model_type, params, integrator_params: Same as SimulationPipeline
+            model_type: Model class (must have save_trajectory/load_trajectory methods)
+            params, integrator_params: Same as SimulationPipeline
             analysis_functions, plot_functions, animation_function: For individual sims
             ensemble_analysis_functions: Functions that analyze the whole ensemble
             ensemble_plot_functions: Functions that plot the whole ensemble
-            save_function: Function to save simulation data
-            load_function: Function to load simulation data
             starting_sim_id: Starting ID for simulations in this ensemble
         """
         self.model_type = model_type
@@ -102,8 +82,6 @@ class Ensemble:
         self.analysis_functions = analysis_functions
         self.plot_functions = plot_functions
         self.animation_function = animation_function
-        self.save_function = save_function
-        self.load_function = load_function
 
         # Ensemble-level functions
         self.ensemble_analysis_functions = ensemble_analysis_functions or {}
@@ -125,7 +103,8 @@ class Ensemble:
             output_dir: Optional[str] = None,
             create_individual_plots: bool = True,
             create_individual_animations: bool = True,
-            max_individual_plots: Optional[int] = None) -> List[SimulationResult]:
+            max_individual_plots: Optional[int] = None,
+            max_individual_animations: Optional[int] = None) -> List[SimulationResult]:
         """
         Run ensemble of simulations.
 
@@ -152,6 +131,12 @@ class Ensemble:
         else:
             visualize_indices = set(range(n_simulations))
 
+        # Determine which simulations to visualize
+        if max_individual_animations is not None:
+            animation_indices = set(range(min(n_simulations, max_individual_animations)))
+        else:
+            animation_indices = set(range(n_simulations))
+
         if parallel and n_simulations > 1:
             # Create partial function with all the fixed parameters
             run_func = partial(
@@ -162,8 +147,6 @@ class Ensemble:
                 self.analysis_functions,
                 self.plot_functions,
                 self.animation_function,
-                self.save_function,
-                self.load_function,
                 T
             )
 
@@ -172,12 +155,13 @@ class Ensemble:
                 futures = []
                 for i in range(n_simulations):
                     should_visualize = i in visualize_indices
+                    should_animate = i in animation_indices
                     # Use starting_sim_id + i as the actual sim_id
                     sim_id = self.starting_sim_id + i
                     future = executor.submit(
                         run_func, sim_id, output_dir,
                         create_individual_plots and should_visualize,
-                        create_individual_animations and should_visualize
+                        create_individual_animations and should_animate,
                     )
                     futures.append(future)
 
@@ -206,7 +190,6 @@ class Ensemble:
                 pipeline = SimulationPipeline(
                     self.model_type, self.params, self.integrator_params,
                     self.analysis_functions, self.plot_functions, self.animation_function,
-                    self.save_function, self.load_function,
                     sim_id=sim_id  # Pass the correct sim_id
                 )
                 result = pipeline.run(T, progress=False)
@@ -293,7 +276,6 @@ class Ensemble:
                 pipeline = SimulationPipeline(
                     self.model_type, self.params, self.integrator_params,
                     self.analysis_functions, self.plot_functions, self.animation_function,
-                    self.save_function, self.load_function,
                     sim_id=sim_id
                 )
                 pipeline.visualize(result, ind_dir, animation=False)
@@ -313,6 +295,7 @@ class Ensemble:
                         kwargs['all_results'] = self.results
                     if 'params' in sig.parameters:
                         kwargs['params'] = self.params
+                    # TODO REMOVE ME
                     if 'rotation_types' in sig.parameters:
                         kwargs['rotation_types'] = self.ensemble_analysis.get('rotation_types')
 

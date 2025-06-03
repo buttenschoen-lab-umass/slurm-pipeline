@@ -1,5 +1,6 @@
 """
 SLURM job monitoring with real-time progress tracking.
+Simplified version: One job = one ensemble, no chunk tracking needed.
 """
 
 import subprocess
@@ -7,7 +8,6 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
-import json
 
 from tqdm.auto import tqdm
 
@@ -26,14 +26,12 @@ class SlurmMonitor:
             job_tracker: Optional JobTracker instance for automatic tracking
         """
         self.check_interval = check_interval
-        self.active_monitors = {}
         self.job_tracker = job_tracker
 
     def monitor_job(self,
                    job_id: str,
                    job_name: Optional[str] = None,
                    output_dir: Optional[str] = None,
-                   expected_markers: Optional[int] = None,
                    show_progress: bool = True,
                    callback: Optional[callable] = None) -> JobInfo:
         """
@@ -42,8 +40,7 @@ class SlurmMonitor:
         Args:
             job_id: SLURM job ID
             job_name: Job name for display
-            output_dir: Directory to monitor for completion markers
-            expected_markers: Expected number of completion markers (for array jobs)
+            output_dir: Directory to check for completion marker
             show_progress: Show tqdm progress bar
             callback: Function to call on each update with JobInfo
 
@@ -51,18 +48,11 @@ class SlurmMonitor:
             Final JobInfo
         """
         if show_progress:
-            if expected_markers:
-                pbar = tqdm(total=expected_markers,
-                          desc=f"{job_name or job_id}",
-                          unit="tasks")
-            else:
-                pbar = tqdm(total=1,
-                          desc=f"{job_name or job_id}",
-                          bar_format='{desc}: {elapsed} [{postfix}]')
+            pbar = tqdm(total=1,
+                       desc=f"{job_name or job_id}",
+                       bar_format='{desc}: {elapsed} [{postfix}]')
         else:
             pbar = None
-
-        last_marker_count = 0
 
         try:
             while True:
@@ -76,20 +66,14 @@ class SlurmMonitor:
                     if job_info.state == JobState.PENDING:
                         pbar.set_postfix_str("Pending in queue")
                     elif job_info.state == JobState.RUNNING:
-                        if output_dir and expected_markers:
-                            # Count completion markers
-                            marker_count = self._count_markers(output_dir, expected_markers)
-                            if marker_count > last_marker_count:
-                                pbar.update(marker_count - last_marker_count)
-                                last_marker_count = marker_count
-                            pbar.set_postfix_str(f"Running on {job_info.nodes} nodes")
-                        else:
-                            elapsed = job_info.elapsed_time or timedelta(0)
-                            pbar.set_postfix_str(f"Running - {self._format_time(elapsed)}")
+                        elapsed = job_info.elapsed_time or timedelta(0)
+                        status = f"Running - {self._format_time(elapsed)}"
+                        if job_info.nodes > 0:
+                            status += f" on {job_info.nodes} nodes"
+                        pbar.set_postfix_str(status)
                     elif job_info.state in [JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED]:
-                        if pbar.n < pbar.total:
-                            pbar.n = pbar.total
-                            pbar.refresh()
+                        pbar.n = 1
+                        pbar.refresh()
                         status_str = f"{job_info.state.value}"
                         if job_info.exit_code and job_info.exit_code != "0:0":
                             status_str += f" (exit: {job_info.exit_code})"
@@ -120,6 +104,8 @@ class SlurmMonitor:
         """
         Monitor an ensemble submission.
 
+        Simplified: Just monitor the single job, no chunks.
+
         Args:
             submission_result: Result from SlurmPipeline.submit_ensemble()
             show_progress: Show progress bar
@@ -131,7 +117,6 @@ class SlurmMonitor:
             job_id=submission_result['job_id'],
             job_name=submission_result['job_name'],
             output_dir=submission_result.get('output_dir'),
-            expected_markers=submission_result.get('n_chunks'),
             show_progress=show_progress
         )
 
@@ -140,6 +125,8 @@ class SlurmMonitor:
         """
         Monitor a parameter scan submission.
 
+        Simplified: Monitor array job completion by counting completed parameter points.
+
         Args:
             submission_result: Result from SlurmPipeline.submit_parameter_scan()
             show_progress: Show progress bar
@@ -147,112 +134,64 @@ class SlurmMonitor:
         Returns:
             Final JobInfo
         """
-        return self.monitor_job(
-            job_id=submission_result['job_id'],
-            job_name=submission_result['job_name'],
-            output_dir=submission_result.get('output_dir'),
-            expected_markers=submission_result.get('n_points'),
-            show_progress=show_progress
-        )
+        job_id = submission_result['job_id']
+        job_name = submission_result['job_name']
+        output_dir = submission_result.get('output_dir')
+        n_points = submission_result.get('n_points', 0)
 
-    def monitor_multiple(self, submissions: List[Dict[str, Any]],
-                        show_progress: bool = True) -> List[JobInfo]:
-        """
-        Monitor multiple job submissions simultaneously.
+        if show_progress and n_points > 0:
+            pbar = tqdm(total=n_points,
+                       desc=f"{job_name or job_id}",
+                       unit="params")
+        else:
+            pbar = None
 
-        Args:
-            submissions: List of submission results
-            show_progress: Show progress bars
-
-        Returns:
-            List of final JobInfo objects
-        """
-        if not show_progress:
-            # Simple sequential monitoring without progress
-            return [self.monitor_job(sub['job_id'], sub.get('job_name'),
-                                   show_progress=False)
-                    for sub in submissions]
-
-        # Create multi-progress bar
-        job_bars = {}
-        overall_bar = tqdm(total=len(submissions), desc="Overall", position=0)
-
-        # Initialize progress bars for each job
-        for i, sub in enumerate(submissions):
-            if sub.get('array_jobs') and sub.get('n_chunks'):
-                total = sub['n_chunks']
-            elif sub.get('n_points'):
-                total = sub['n_points']
-            else:
-                total = 1
-
-            job_bars[sub['job_id']] = {
-                'pbar': tqdm(total=total,
-                           desc=sub.get('job_name', sub['job_id']),
-                           position=i+1,
-                           leave=False),
-                'submission': sub,
-                'last_count': 0,
-                'completed': False
-            }
-
-        results = []
+        last_completed = 0
 
         try:
-            while len(results) < len(submissions):
-                for job_id, info in job_bars.items():
-                    if info['completed']:
-                        continue
+            while True:
+                # Get job info
+                job_info = self.get_job_info(job_id)
+                if job_name:
+                    job_info.job_name = job_name
 
-                    sub = info['submission']
-                    job_info = self.get_job_info(job_id)
+                # Count completed parameter points
+                if output_dir and n_points > 0:
+                    completed = self._count_completed_points(output_dir)
+                    if completed > last_completed and pbar:
+                        pbar.update(completed - last_completed)
+                        last_completed = completed
 
-                    # Update individual progress
-                    pbar = info['pbar']
+                # Update progress bar status
+                if pbar:
                     if job_info.state == JobState.PENDING:
-                        pbar.set_postfix_str("Pending")
+                        pbar.set_postfix_str("Pending in queue")
                     elif job_info.state == JobState.RUNNING:
-                        if sub.get('output_dir'):
-                            # Count markers
-                            if sub.get('n_chunks'):
-                                marker_count = self._count_markers(
-                                    sub['output_dir'], sub['n_chunks'],
-                                    prefix="completed_chunk_"
-                                )
-                            elif sub.get('n_points'):
-                                marker_count = self._count_scan_markers(
-                                    sub['output_dir']
-                                )
-                            else:
-                                marker_count = 0
-
-                            if marker_count > info['last_count']:
-                                pbar.update(marker_count - info['last_count'])
-                                info['last_count'] = marker_count
-
-                        pbar.set_postfix_str(f"Running")
-                    elif job_info.state in [JobState.COMPLETED, JobState.FAILED,
-                                           JobState.CANCELLED]:
+                        pbar.set_postfix_str(f"Running on {job_info.nodes} nodes")
+                    elif job_info.state in [JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED]:
                         if pbar.n < pbar.total:
                             pbar.n = pbar.total
                             pbar.refresh()
-                        pbar.set_postfix_str(job_info.state.value)
-                        info['completed'] = True
-                        results.append(job_info)
-                        overall_bar.update(1)
+                        status_str = f"{job_info.state.value}"
+                        if job_info.exit_code and job_info.exit_code != "0:0":
+                            status_str += f" (exit: {job_info.exit_code})"
+                        pbar.set_postfix_str(status_str)
 
-                        # Notify job tracker if available
-                        if self.job_tracker:
-                            self.job_tracker.complete_job(job_id)
+                # Check if job is done
+                if job_info.state in [JobState.COMPLETED, JobState.FAILED,
+                                     JobState.CANCELLED, JobState.TIMEOUT]:
+                    # Notify job tracker if available
+                    if self.job_tracker:
+                        self.job_tracker.complete_job(job_id)
+                    break
 
                 time.sleep(self.check_interval)
 
         finally:
-            overall_bar.close()
-            for info in job_bars.values():
-                info['pbar'].close()
+            if pbar:
+                pbar.close()
 
-        return results
+        return job_info
 
     def get_job_info(self, job_id: str) -> JobInfo:
         """Get current information about a job."""
@@ -286,8 +225,8 @@ class SlurmMonitor:
             # Check for array job
             array_size = None
             if len(parts) > 5 and '_' in parts[5]:
-                # Array job format: jobid_arraytaskid
-                array_size = self._get_array_size(job_id)
+                # Array job - count tasks
+                array_size = self._count_array_tasks(job_id)
 
             return JobInfo(
                 job_id=job_id,
@@ -372,7 +311,6 @@ class SlurmMonitor:
 
     def _parse_elapsed(self, elapsed_str: str) -> timedelta:
         """Parse SLURM elapsed time string."""
-        # Same format as time limit
         return self._parse_time_limit(elapsed_str)
 
     def _format_time(self, td: timedelta) -> str:
@@ -389,23 +327,8 @@ class SlurmMonitor:
         else:
             return f"{seconds}s"
 
-    def _count_markers(self, output_dir: str, expected: int,
-                      prefix: str = "completed_chunk_") -> int:
-        """Count completion marker files."""
-        output_path = Path(output_dir)
-        if not output_path.exists():
-            return 0
-
-        count = 0
-        for i in range(expected):
-            marker = output_path / f"{prefix}{i}.marker"
-            if marker.exists():
-                count += 1
-
-        return count
-
-    def _count_scan_markers(self, output_dir: str) -> int:
-        """Count parameter scan completion markers."""
+    def _count_completed_points(self, output_dir: str) -> int:
+        """Count completed parameter points by looking for completion markers."""
         output_path = Path(output_dir)
         if not output_path.exists():
             return 0
@@ -420,9 +343,9 @@ class SlurmMonitor:
 
         return count
 
-    def _get_array_size(self, job_id: str) -> Optional[int]:
-        """Get array size for an array job."""
-        # Query array job details
+    def _count_array_tasks(self, job_id: str) -> Optional[int]:
+        """Count array tasks for an array job."""
+        # For our simplified model, we can get this from squeue
         cmd = ['squeue', '-j', job_id, '--format=%F', '--noheader']
         result = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -446,8 +369,6 @@ class SlurmMonitor:
 
         if job_info.array_size:
             print(f"Array Size: {job_info.array_size}")
-            if job_info.array_completed:
-                print(f"Completed: {job_info.array_completed}/{job_info.array_size}")
 
         if job_info.start_time:
             print(f"Start Time: {job_info.start_time}")
