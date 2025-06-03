@@ -2,24 +2,31 @@
 """
 SLURM runner script for simulation pipeline objects.
 Simplified version: Each SLURM job runs one complete ensemble.
+Now with tmpfs support for improved I/O performance.
 """
 
 import sys
 import pickle
+import itertools
 import json
 from pathlib import Path
 import traceback
 import os
 
+# Import will be updated after we add tmpfs_manager to the package
 from slurm_pipeline import Ensemble
+from slurm_pipeline.slurm.tmpfs_manager import get_tmpfs_info
+from slurm_pipeline.slurm.tmpfs_manager import TmpfsManager
 
 
-def run_ensemble_for_parameter_point(obj, config, array_index=None):
+def run_ensemble_for_parameter_point(obj, config, array_index=None, use_tmpfs=True):
     """
     Run a complete ensemble for a single parameter point.
     Used for both standalone ensembles and parameter scans.
+
+    Args:
+        use_tmpfs: Whether to use local tmpfs for execution
     """
-    import itertools
 
     # Determine parameters for this run
     if config['type'] == 'parameter_scan' and array_index is not None:
@@ -75,36 +82,89 @@ def run_ensemble_for_parameter_point(obj, config, array_index=None):
     print(f"Running {n_sims} simulations using {max_workers} workers")
     print(f"Will create plots for {'all' if always_plot_all else f'up to {max_plots}'} simulations")
 
-    # Run the complete ensemble pipeline - this handles everything!
-    ensemble_analysis = ensemble.run_complete(
-        n_simulations=n_sims,
-        T=config['T'],
-        output_dir=str(output_dir),
-        parallel=True,  # Always use parallel execution
-        max_workers=max_workers,  # Use allocated CPUs
-        progress=True,  # Show progress
-        create_individual_plots=config.get('create_individual_plots', True),
-        create_individual_animations=config.get('create_individual_animations', False),
-        max_individual_plots=max_plots,
-        max_individual_animations=max_animations,
-        ensemble_plots=config.get('create_ensemble_plots', True)
-    )
+    # Determine if we should use tmpfs
+    use_tmpfs = use_tmpfs and config.get('use_tmpfs', True)
 
-    # Save ensemble results for later collection
-    results_file = output_dir / "ensemble_results.pkl"
-    results_data = {
-        # 'results': ensemble.results, Each pipeline saves its sim data.
-        'analysis': ensemble_analysis,
-        'params': params,
-    }
-    with open(results_file, 'wb') as f:
-        pickle.dump(results_data, f)
+    if use_tmpfs:
+        print("\nUsing tmpfs for improved I/O performance")
 
-    # Save completion marker
-    marker_file = output_dir / "completed.marker"
-    marker_file.touch()
+        # Create tmpfs manager
+        job_name = config.get('job_name', 'simulation')
+        if array_index is not None:
+            job_name = f"{job_name}_array_{array_index}"
 
-    print(f"Ensemble completed successfully")
+        tmpfs = TmpfsManager(
+            nfs_base_dir=str(output_dir),
+            job_name=job_name,
+            use_dev_shm=config.get('tmpfs_use_dev_shm', True),
+            use_tmp=config.get('tmpfs_use_tmp', True),
+            custom_tmpfs=config.get('tmpfs_custom_path', None)
+        )
+
+        # Set up tmpfs workspace
+        local_work_dir = tmpfs.setup()
+
+        # Map output directory to local tmpfs
+        local_output_dir = tmpfs.map_path(str(output_dir))
+        print(f"Local work directory: {local_output_dir}")
+
+        # No input files to copy for this use case
+        # (ensemble creates everything from scratch)
+
+    else:
+        print("\nRunning directly on NFS")
+        local_output_dir = str(output_dir)
+        tmpfs = None
+
+    try:
+        # Run the complete ensemble pipeline - this handles everything!
+        ensemble_analysis = ensemble.run_complete(
+            n_simulations=n_sims,
+            T=config['T'],
+            output_dir=local_output_dir,  # Use local directory
+            parallel=True,  # Always use parallel execution
+            max_workers=max_workers,  # Use allocated CPUs
+            progress=True,  # Show progress
+            create_individual_plots=config.get('create_individual_plots', True),
+            create_individual_animations=config.get('create_individual_animations', False),
+            max_individual_plots=max_plots,
+            max_individual_animations=max_animations,
+            ensemble_plots=config.get('create_ensemble_plots', True)
+        )
+
+        # Save ensemble results for later collection
+        results_file = Path(local_output_dir) / "ensemble_results.pkl"
+        results_data = {
+            # 'results': ensemble.results, Each pipeline saves its sim data.
+            'analysis': ensemble_analysis,
+            'params': params,
+        }
+        with open(results_file, 'wb') as f:
+            pickle.dump(results_data, f)
+
+        # Save completion marker
+        marker_file = Path(local_output_dir) / "completed.marker"
+        marker_file.touch()
+
+        print(f"Ensemble completed successfully")
+
+    finally:
+        # Sync back to NFS if using tmpfs
+        if tmpfs and tmpfs.is_active:
+            print("\nSyncing results back to NFS...")
+            try:
+                # Exclude temporary files
+                exclude_patterns = config.get('tmpfs_exclude_patterns', ['*.tmp', '*.swp'])
+                tmpfs.sync_back(exclude_patterns=exclude_patterns)
+                print("Sync completed successfully")
+            except Exception as e:
+                print(f"ERROR during sync: {e}")
+                # Try emergency sync without exclusions
+                try:
+                    tmpfs.sync_back(exclude_patterns=None)
+                except:
+                    pass
+                raise
 
 
 def main():
@@ -132,6 +192,18 @@ def main():
     print(f"Array index: {array_index}")
     print(f"Environment file: {env_file if env_file else 'None'}")
     print(f"{'='*60}")
+
+    # Check tmpfs availability
+    try:
+        tmpfs_info = get_tmpfs_info()
+        print("\nTmpfs locations:")
+        for loc, info in tmpfs_info['locations'].items():
+            if info.get('exists') and info.get('writable'):
+                print(f"  {loc}: {info.get('available_gb', 0):.1f} GB available ({info.get('mount_type', 'unknown')})")
+        if tmpfs_info['recommended']:
+            print(f"Recommended: {tmpfs_info['recommended']}")
+    except Exception as e:
+        print(f"Could not check tmpfs: {e}")
 
     try:
         # Load environment if provided

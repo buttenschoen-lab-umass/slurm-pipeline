@@ -306,6 +306,10 @@ class SlurmPipeline:
             **kwargs
         }
 
+        # Add tmpfs configuration from slurm_config
+        config.update(slurm_config.get_tmpfs_config())
+        config['job_name'] = slurm_config.job_name  # Pass job name for tmpfs directory naming
+
         # No array jobs for single ensemble
         slurm_config.array_size = None
 
@@ -412,6 +416,10 @@ class SlurmPipeline:
             'max_workers': slurm_config.cpus_per_task,  # Each task uses all its CPUs
             **kwargs
         }
+
+        # Add tmpfs configuration from slurm_config
+        config.update(slurm_config.get_tmpfs_config())
+        config['job_name'] = slurm_config.job_name  # Pass job name for tmpfs directory naming
 
         # Always use array jobs for scans
         slurm_config.array_size = n_points

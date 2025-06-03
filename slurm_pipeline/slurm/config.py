@@ -3,7 +3,7 @@ SLURM configuration dataclass for job submission.
 """
 
 import os
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field
 
 
@@ -29,6 +29,13 @@ class SlurmConfig:
     array_size: Optional[int] = None
     email: Optional[str] = None
     email_type: str = "END,FAIL"  # Email on job end and failure
+
+    # Tmpfs configuration
+    use_tmpfs: bool = True  # Enable tmpfs by default
+    tmpfs_use_dev_shm: bool = True  # Try /dev/shm first
+    tmpfs_use_tmp: bool = True  # Fall back to /tmp if needed
+    tmpfs_custom_path: Optional[str] = None  # Custom tmpfs path (e.g., /scratch/local)
+    tmpfs_exclude_patterns: List[str] = field(default_factory=lambda: ['*.tmp', '*.swp', '.nfs*'])
 
     def to_sbatch_header(self) -> str:
         """Convert config to SBATCH header lines."""
@@ -89,3 +96,13 @@ class SlurmConfig:
         lines.append("")
 
         return "\n".join(lines)
+
+    def get_tmpfs_config(self) -> Dict[str, Any]:
+        """Get tmpfs configuration as a dictionary."""
+        return {
+            'use_tmpfs': self.use_tmpfs,
+            'tmpfs_use_dev_shm': self.tmpfs_use_dev_shm,
+            'tmpfs_use_tmp': self.tmpfs_use_tmp,
+            'tmpfs_custom_path': self.tmpfs_custom_path,
+            'tmpfs_exclude_patterns': self.tmpfs_exclude_patterns
+        }
