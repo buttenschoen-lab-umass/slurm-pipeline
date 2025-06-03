@@ -68,7 +68,9 @@ def run_ensemble_for_parameter_point(obj, config, array_index=None):
     n_sims = config.get('n_simulations_per_point', config.get('n_simulations', 20))
     max_workers = config.get('max_workers', config.get('cpus_per_task', 4))
     always_plot_all = config.get('always_plot_all', False)
+    always_animate_all = config.get('always_animate_all', False)
     max_plots = n_sims if always_plot_all else config.get('max_individual_plots', 5)
+    max_animations = n_sims if always_animate_all else config.get('max_individual_animations', 5)
 
     print(f"Running {n_sims} simulations using {max_workers} workers")
     print(f"Will create plots for {'all' if always_plot_all else f'up to {max_plots}'} simulations")
@@ -84,6 +86,7 @@ def run_ensemble_for_parameter_point(obj, config, array_index=None):
         create_individual_plots=config.get('create_individual_plots', True),
         create_individual_animations=config.get('create_individual_animations', False),
         max_individual_plots=max_plots,
+        max_individual_animations=max_animations,
         ensemble_plots=config.get('create_ensemble_plots', True)
     )
 

@@ -315,6 +315,7 @@ class Ensemble:
                      create_individual_plots: bool = True,
                      create_individual_animations: bool = True,
                      max_individual_plots: Optional[int] = None,
+                     max_individual_animations: Optional[int] = None,
                      ensemble_plots: bool = True) -> Dict[str, Any]:
         """
         Run complete ensemble pipeline.
@@ -339,7 +340,8 @@ class Ensemble:
                 max_workers=max_workers,
                 create_individual_plots=create_individual_plots,
                 create_individual_animations=create_individual_animations,
-                max_individual_plots=max_individual_plots)
+                max_individual_plots=max_individual_plots,
+                max_individual_animations=max_individual_animations)
 
         # Analyze ensemble
         self.analyze()
