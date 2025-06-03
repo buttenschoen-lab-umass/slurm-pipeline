@@ -188,20 +188,27 @@ class TmpfsManager:
         if not self.is_active:
             return nfs_path
 
-        nfs_path = Path(nfs_path)
+        nfs_path_obj = Path(nfs_path)
 
         # If it's already under local work dir, return as-is
         if str(nfs_path).startswith(str(self.local_work_dir)):
             return str(nfs_path)
 
+        # For the main case: we want to preserve the directory structure
+        # but in the tmpfs location
+        # So if nfs_path is the same as nfs_base_dir, map to local_work_dir
+        if nfs_path_obj == self.nfs_base_dir:
+            return str(self.local_work_dir)
+
         # Try to make it relative to nfs_base_dir
         try:
-            rel_path = nfs_path.relative_to(self.nfs_base_dir)
+            rel_path = nfs_path_obj.relative_to(self.nfs_base_dir)
             return str(self.local_work_dir / rel_path)
         except ValueError:
             # Path is not under nfs_base_dir
+            # This shouldn't happen in normal usage
             # Put it directly under local work dir
-            return str(self.local_work_dir / nfs_path.name)
+            return str(self.local_work_dir / nfs_path_obj.name)
 
     def sync_back(self,
                   exclude_patterns: Optional[List[str]] = None,
@@ -218,11 +225,15 @@ class TmpfsManager:
 
         self.logger.info("Syncing results back to NFS...")
 
+        # We want to sync the contents of local_work_dir to nfs_base_dir
+        # preserving the directory structure
+
         # Use rsync for efficient sync
         rsync_cmd = [
-            "rsync", "-av", "--relative",
-            f"{self.local_work_dir}/.",  # Source with relative paths
-            f"{self.nfs_base_dir}/"      # Destination
+            "rsync", "-av",
+            "--no-relative",  # Don't use --relative to avoid path issues
+            f"{self.local_work_dir}/",  # Source (trailing slash is important!)
+            f"{self.nfs_base_dir}/"     # Destination
         ]
 
         # Add exclude patterns
@@ -232,6 +243,7 @@ class TmpfsManager:
 
         try:
             # First attempt with rsync
+            self.logger.debug(f"Running rsync command: {' '.join(rsync_cmd)}")
             result = subprocess.run(rsync_cmd, capture_output=True, text=True)
             if result.returncode == 0:
                 self.logger.info("Rsync completed successfully")
@@ -257,6 +269,11 @@ class TmpfsManager:
     def _python_sync_back(self, exclude_patterns: Optional[List[str]] = None):
         """Python-based fallback for syncing files back to NFS."""
         import fnmatch
+
+        if not self.local_work_dir or not self.local_work_dir.exists():
+            return
+
+        self.logger.info(f"Syncing from {self.local_work_dir} to {self.nfs_base_dir}")
 
         for root, dirs, files in os.walk(self.local_work_dir):
             root_path = Path(root)
@@ -286,11 +303,14 @@ class TmpfsManager:
                 src = root_path / file
 
                 # Calculate destination path
+                # Since local_work_dir corresponds to nfs_base_dir,
+                # we just need to copy the directory structure
                 try:
                     rel_path = src.relative_to(self.local_work_dir)
                     dst = self.nfs_base_dir / rel_path
                 except ValueError:
                     # Should not happen
+                    self.logger.error(f"Unexpected path structure: {src}")
                     continue
 
                 # Create parent directory
@@ -299,6 +319,7 @@ class TmpfsManager:
                 # Copy file
                 try:
                     shutil.copy2(src, dst)
+                    self.logger.debug(f"Copied: {src} -> {dst}")
                 except Exception as e:
                     self.logger.error(f"Failed to copy {src} to {dst}: {e}")
 
