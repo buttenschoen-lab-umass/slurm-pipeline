@@ -4,6 +4,7 @@ from typing import Dict, List, Tuple, Callable, Any, Optional, Union
 from dataclasses import dataclass
 from tqdm.auto import tqdm
 import concurrent.futures
+import traceback
 from functools import partial
 
 from .pipeline import SimulationPipeline
@@ -227,21 +228,8 @@ class Ensemble:
                 self.ensemble_analysis[name] = func(self.results)
             except Exception as e:
                 print(f"Ensemble analysis '{name}' failed: {e}")
+                traceback.print_exc()
                 self.ensemble_analysis[name] = None
-
-        # Aggregate individual analyses
-        if self.results and self.results[0].analysis:
-            # Example: rotation statistics
-            if 'rotation' in self.results[0].analysis:
-                rotation_types = [r.analysis['rotation'] for r in self.results
-                                if r.analysis and 'rotation' in r.analysis]
-                if rotation_types:
-                    self.ensemble_analysis['rotation_types'] = rotation_types
-                    self.ensemble_analysis['rotation_statistics'] = {
-                        'CW': rotation_types.count('CW') / len(rotation_types) * 100,
-                        'CCW': rotation_types.count('CCW') / len(rotation_types) * 100,
-                        'NR': rotation_types.count('NR') / len(rotation_types) * 100
-                    }
 
         return self.ensemble_analysis
 
@@ -288,23 +276,16 @@ class Ensemble:
                 try:
                     save_path = os.path.join(output_dir, f"ensemble_{name}.png")
 
-                    # Call with appropriate arguments
-                    import inspect
-                    sig = inspect.signature(func)
-                    kwargs = {'save_path': save_path}
+                    # Call plotting function
+                    func(
+                        results=self.results,
+                        ensemble_analysis=self.ensemble_analysis,
+                        params=self.params,
+                        save_path=save_path
+                    )
 
-                    if 'all_results' in sig.parameters:
-                        kwargs['all_results'] = self.results
-                    if 'params' in sig.parameters:
-                        kwargs['params'] = self.params
-                    # TODO REMOVE ME
-                    if 'rotation_types' in sig.parameters:
-                        kwargs['rotation_types'] = self.ensemble_analysis.get('rotation_types')
-
-                    func(**kwargs)
                 except Exception as e:
                     print(f"Ensemble plot '{name}' failed: {e}")
-                    import traceback
                     traceback.print_exc()
 
     def run_complete(self,
