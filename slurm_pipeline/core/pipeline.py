@@ -94,10 +94,6 @@ class SimulationPipeline:
         Returns:
             SimulationResult object
         """
-        # Generate initial state if needed
-        if initial_state is None:
-            initial_state = self.model.random_ic()
-
         # Run simulation
         t, solution = self.model.simulate(
             T=T,
