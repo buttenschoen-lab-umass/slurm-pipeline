@@ -1,5 +1,6 @@
 import os
 import numpy as np
+from pathlib import Path
 from typing import Dict, List, Tuple, Callable, Any, Optional, Union
 from dataclasses import dataclass
 from tqdm.auto import tqdm
@@ -50,6 +51,33 @@ class SimulationPipeline:
 
         # Create model instance
         self.model = model_type(**params)
+
+    def save_readable_parameters(self, output_dir: str):
+        """Save parameters in human-readable format."""
+        params_file = Path(output_dir) / "parameters.txt"
+
+        with open(params_file, 'w') as f:
+            f.write("="*60 + "\n")
+            f.write("SIMULATION PARAMETERS\n")
+            f.write("="*60 + "\n\n")
+
+            f.write(f"Simulation ID: {self.sim_id}\n")
+            f.write(f"Model Type: {self.model_type.__name__}\n\n")
+
+            # Model parameters
+            if hasattr(self.model, 'get_parameter_summary'):
+                f.write("Model Configuration:\n")
+                f.write("-"*30 + "\n")
+                f.write(self.model.get_parameter_summary())
+                f.write("\n")
+
+            # Integration parameters
+            f.write("Integration Parameters:\n")
+            f.write("-"*30 + "\n")
+            for key, value in self.integrator_params.items():
+                f.write(f"  {key:20s}: {value}\n")
+
+            f.write("\n" + "="*60 + "\n")
 
     def save(self, result: SimulationResult, filepath: str) -> None:
         """Save simulation data using model's save_trajectory method."""
@@ -195,6 +223,9 @@ class SimulationPipeline:
         # Visualize if output directory provided
         if output_dir:
             result = self.visualize(result, output_dir)
+
+            # Save parameters in human readable form
+            self.save_readable_parameters(output_dir)
 
             # Save data
             if save_data:

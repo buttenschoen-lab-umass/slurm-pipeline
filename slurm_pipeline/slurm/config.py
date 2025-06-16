@@ -29,6 +29,7 @@ class SlurmConfig:
     output_dir: str = "slurm_output"  # Deprecated - use slurm_output_dir
     slurm_output_dir: Optional[str] = None  # Directory for SLURM logs (stdout/stderr)
     array_size: Optional[int] = None
+    array_throttle: Optional[int] = 250  # Default throttle for array jobs
     email: Optional[str] = None
     email_type: str = "END,FAIL"  # Email on job end and failure
 
@@ -87,7 +88,10 @@ class SlurmConfig:
         if self.gres:
             lines.append(f"#SBATCH --gres={self.gres}")
         if self.array_size:
-            lines.append(f"#SBATCH --array=0-{self.array_size-1}")
+            if self.array_throttle:
+                lines.append(f"#SBATCH --array=0-{self.array_size-1}%{self.array_throttle}")
+            else:
+                lines.append(f"#SBATCH --array=0-{self.array_size-1}")
         if self.email:
             lines.append(f"#SBATCH --mail-user={self.email}")
             lines.append(f"#SBATCH --mail-type={self.email_type}")
@@ -160,6 +164,7 @@ class SlurmConfig:
                       cpus_per_task: int = 1,
                       time: str = "01:00:00",
                       mem: Optional[str] = None,
+                      array_throttle: Optional[int] = 250,
                       **kwargs) -> 'SlurmConfig':
         """
         Create config for array jobs (embarrassingly parallel, independent tasks).
@@ -177,6 +182,7 @@ class SlurmConfig:
         """
         defaults = {
             'array_size': array_size,
+            'array_throttle': array_throttle,
             'ntasks': 1,  # Each array task is single-threaded
             'nodes': 1,   # Each array task gets one node allocation
             'hint': 'nomultithread',

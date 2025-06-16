@@ -31,6 +31,30 @@ def _run_single_simulation(model_type: type,
         analysis_functions, plot_functions, animation_function,
         sim_id=sim_index
     )
+
+    # Save readable parameters automatically if not exist
+    if output_dir:
+        ensemble_params_file = os.path.join(output_dir, 'parameters.txt')
+
+        # Use atomic file creation to avoid race
+        # Only one simulation creates the file
+        try:
+            # O_CREAT | O_EXCL ensures atomic creation
+            fd = os.open(ensemble_params_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+
+            # We got the fd so let the pipeline do its thing
+            os.close(fd)
+
+            # We go the fd so we are first now
+            pipeline.save_readable_parameters(output_dir)
+
+        except FileExistsError:
+            # Another process already created it, that's fine
+            pass
+        except Exception as e:
+            # Log but don't fail
+            print(f'WARNING: Could not save parameters.txt: {e}')
+
     result = pipeline.run(T, progress=False)
     result = pipeline.analyze(result)
 

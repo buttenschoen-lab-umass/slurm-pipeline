@@ -408,6 +408,9 @@ class SlurmPipeline:
         # Normalize output directory
         output_dir = self._normalize_output_dir(output_dir, slurm_config.job_name)
 
+        # Create paramter index
+        scan.create_parameter_index(output_dir)
+
         # Simple configuration
         config = {
             'type': 'parameter_scan',

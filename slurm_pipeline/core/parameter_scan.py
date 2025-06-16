@@ -1,8 +1,8 @@
 import os
 import copy
-import numpy as np
-from typing import Dict, List, Tuple, Callable, Any, Optional, Union
-from dataclasses import dataclass
+import itertools
+from pathlib import Path
+from typing import Dict, List, Tuple, Callable, Any, Optional
 from tqdm.auto import tqdm
 import concurrent.futures
 from functools import partial
@@ -135,6 +135,28 @@ class ParameterScan:
 
         # Results storage
         self.scan_results: Dict[Tuple, Dict[str, Any]] = {}
+
+    def create_parameter_index(self, output_dir: str):
+        """Create an index file mapping parameters to directories."""
+        index_file = Path(output_dir) / 'parameter_index.csv'
+
+        param_names = list(self.scan_params.keys())
+        param_combinations = list(itertools.product(*self.scan_params.values()))
+
+        with open(index_file, 'w') as f:
+            # Write header
+            f.write("directory," + ",".join(param_names) + "\n")
+
+            # Write each parameter combination
+            for combination in param_combinations:
+                # Generate directory name (matching _run_parameter_point logic)
+                param_str = "_".join([f"{k}_{v:.3g}" if isinstance(v, (int, float)) else f"{k}_{v}"
+                                    for k, v in zip(param_names, combination)])
+
+                # Write row
+                f.write(f"{param_str}," + ",".join(str(v) for v in combination) + "\n")
+
+        print(f"Created parameter index: {index_file}")
 
     def run(self,
             n_simulations_per_point: int,
@@ -383,6 +405,10 @@ class ParameterScan:
         Returns:
             Dictionary mapping parameter tuples to ensemble results
         """
+        # Create parameter index
+        if output_dir:
+            self.create_parameter_index(output_dir)
+
         # Run scan with visualization
         self.run(
             n_simulations_per_point, T, parallel, parallel_mode, max_workers, progress,
