@@ -14,7 +14,7 @@ class SlurmConfig:
     time: str = "01:00:00"
     mem: str = ""
     cpus_per_task: int = 1
-    nodes: int = 1
+    nodes: int = 0
     ntasks: int = 1
     job_name: str = "simulation"
     account: Optional[str] = None
@@ -68,9 +68,10 @@ class SlurmConfig:
         lines.append(f"#SBATCH --job-name={self.job_name}")
         lines.append(f"#SBATCH --time={self.time}")
         lines.append(f"#SBATCH --cpus-per-task={self.cpus_per_task}")
-        lines.append(f"#SBATCH --nodes={self.nodes}")
         lines.append(f"#SBATCH --ntasks={self.ntasks}")
 
+        if self.nodes > 0:
+            lines.append(f"#SBATCH --nodes={self.nodes}")
         if self.mem:
             lines.append(f"#SBATCH --mem={self.mem}")
         if self.partition:
