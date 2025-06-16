@@ -1,36 +1,23 @@
 # SLURM Pipeline
 
-A Python module for running simulation pipelines on SLURM clusters with automatic distribution, monitoring, and result collection.
+A Python module for running simulation pipelines on SLURM clusters with
+automatic distribution, monitoring, and result collection.
 
 ## Features
 
 - **Automatic work distribution** across SLURM array jobs
 - **Real-time progress monitoring** with tqdm progress bars
-- **NFS-aware** file handling for cluster environments
+- **NFS-aware** (i.e. slow-storage aware) file handling for cluster environments
 - **Hierarchical execution**: Single simulations → Ensembles → Parameter scans
 - **Automatic post-processing** and result collection
 - **Built-in diagnostics** for debugging cluster issues
 
 ## Installation
 
-### Option 1: Install from source
 ```bash
 git clone https://github.com/yourusername/slurm-pipeline.git
 cd slurm-pipeline
 pip install -e .
-```
-
-### Option 2: Install on cluster nodes
-```bash
-# On login node
-cd slurm-pipeline
-python setup.py sdist
-
-# Copy to shared location
-cp dist/slurm-pipeline-0.1.0.tar.gz /shared/software/
-
-# On compute nodes (or in your SLURM script)
-pip install --user /shared/software/slurm-pipeline-0.1.0.tar.gz
 ```
 
 ## Quick Start
@@ -70,34 +57,6 @@ result = slurm.submit_ensemble(
     sims_per_job=50,  # 20 array jobs
     wait_for_completion=True
 )
-```
-
-## Directory Structure
-
-The module creates this structure on your NFS mount:
-```
-/your/nfs/path/slurm_pipeline/
-├── inputs/          # Serialized objects and configs
-├── scripts/         # SLURM batch scripts and runner.py
-├── outputs/         # Simulation results
-├── logs/           # SLURM stdout/stderr
-└── submissions/    # Job submission records
-```
-
-## Module Structure
-
-```
-slurm_pipeline/
-├── core/           # Core simulation components
-│   ├── pipeline.py      # Single simulation pipeline
-│   ├── ensemble.py      # Ensemble of simulations
-│   └── parameter_scan.py # Parameter space scanning
-├── slurm/          # SLURM-specific components
-│   ├── config.py        # SLURM job configuration
-│   ├── pipeline.py      # Main SLURM pipeline
-│   └── monitor.py       # Job monitoring
-├── diagnostics/    # Debugging tools
-└── tests/          # Test suite
 ```
 
 ## Usage Examples
@@ -158,19 +117,6 @@ status = slurm.check_job_status(submission['job_id'])
 result = slurm.monitor_and_collect(submission)
 ```
 
-## Diagnostics
-
-```bash
-# Run diagnostics
-slurm-pipeline-diagnose --nfs-dir /scratch/$USER/slurm_pipeline
-
-# Test submission
-slurm-pipeline-diagnose --test-submit
-
-# Run test suite
-slurm-pipeline-test --quick
-```
-
 ## Configuration
 
 ### SLURM Configuration
@@ -199,7 +145,7 @@ slurm = SlurmPipeline(nfs_work_dir="/custom/nfs/path")
 - NumPy ≥ 1.19
 - Matplotlib ≥ 3.3
 - tqdm ≥ 4.60
-- SLURM cluster with shared NFS storage
+- SLURM cluster with shared storage
 
 ## License
 
