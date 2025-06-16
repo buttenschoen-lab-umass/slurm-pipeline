@@ -1,4 +1,5 @@
 import os
+import copy
 import numpy as np
 from typing import Dict, List, Tuple, Callable, Any, Optional, Union
 from dataclasses import dataclass
@@ -38,9 +39,19 @@ def _run_parameter_point(model_type: type,
         Tuple of (param_key, results_dict)
     """
     # Create parameter dictionary for this point
-    params = base_params.copy()
-    for name, value in zip(param_names, param_combination):
-        params[name] = value
+    # Use the same logic as _create_params_for_point
+    if 'config' in base_params and hasattr(base_params['config'], '__dict__'):
+        config = copy.deepcopy(base_params['config'])
+        for name, value in zip(param_names, param_combination):
+            setattr(config, name, value)
+        if hasattr(config, 'init'):
+            config.init()
+
+        params = {'config': config}
+    else:
+        params = base_params.copy()
+        for name, value in zip(param_names, param_combination):
+            params[name] = value
 
     # Create ensemble directory if output_dir is provided
     ensemble_output_dir = None

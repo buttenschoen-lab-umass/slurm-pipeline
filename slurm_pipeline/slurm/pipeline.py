@@ -443,6 +443,7 @@ class SlurmPipeline:
         )
 
         config_file = self.nfs_input_dir / f"{slurm_config.job_name}_config.json"
+        print('config = ', config)
         with open(config_file, 'w') as f:
             json.dump(config, f, indent=2)
 
