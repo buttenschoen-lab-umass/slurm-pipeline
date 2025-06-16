@@ -6,6 +6,7 @@ Now with tmpfs support for improved I/O performance.
 """
 
 import sys
+import copy
 import pickle
 import itertools
 import json
@@ -15,8 +16,27 @@ import os
 
 # Import will be updated after we add tmpfs_manager to the package
 from slurm_pipeline import Ensemble
-from slurm_pipeline.slurm.tmpfs_manager import get_tmpfs_info
-from slurm_pipeline.slurm.tmpfs_manager import TmpfsManager
+from slurm_pipeline.slurm.json_encoder import reconstruct_from_dict
+from slurm_pipeline.slurm.tmpfs_manager import TmpfsManager, get_tmpfs_info
+
+
+def reconstruct_config_objects(params):
+    """
+    Reconstruct config objects from serialized dictionaries.
+
+    Uses the json_encoder's reconstruct_from_dict function to handle
+    objects with __class_module__ and __class_name__ metadata.
+    """
+    if 'config' in params and isinstance(params['config'], dict):
+        reconstructed = reconstruct_from_dict(params['config'])
+        if reconstructed is not params['config']:
+            # Reconstruction succeeded
+            params['config'] = reconstructed
+            print(f"Reconstructed config object from dictionary")
+        else:
+            print("No class metadata found or reconstruction failed, keeping as dict")
+
+    return params
 
 
 def run_ensemble_for_parameter_point(obj, config, array_index=None, use_tmpfs=True):
@@ -43,6 +63,33 @@ def run_ensemble_for_parameter_point(obj, config, array_index=None, use_tmpfs=Tr
 
         # Update base parameters with scan values
         params = config['base_params'].copy()
+
+        # Handle special case where we have a config object
+        if 'config' in params:
+            # If it's a dict (from JSON), reconstruct it first
+            params = reconstruct_config_objects(params)
+
+            # Now update the config object with scan parameters
+            if hasattr(params['config'], '__dict__'):
+                # It's a config object, update its attributes
+                params['config'] = copy.deepcopy(params['config'])
+                for name, value in zip(param_names, param_combination):
+                    setattr(params['config'], name, value)
+
+                # Reinitialize interactions if the config has this method
+                if hasattr(params['config'], 'init'):
+                    params['config'].init()
+            else:
+                # Fallback: treat as dict
+                for name, value in zip(param_names, param_combination):
+                    params[name] = value
+        else:
+            # Regular parameter update
+            for name, value in zip(param_names, param_combination):
+                params[name] = value
+
+        # Update base parameters with scan values
+        params = config['base_params'].copy()
         for name, value in zip(param_names, param_combination):
             params[name] = value
 
@@ -56,6 +103,7 @@ def run_ensemble_for_parameter_point(obj, config, array_index=None, use_tmpfs=Tr
     else:
         # Standalone ensemble - use base parameters
         params = obj.params
+        params = reconstruct_config_objects(params)
         output_dir = Path(config['output_dir'])
         print("Running standalone ensemble")
 
@@ -234,9 +282,14 @@ def main():
 
         # Load configuration
         print("\nLoading configuration...")
+        from slurm_pipeline.slurm.json_encoder import load
         with open(config_file, 'r') as f:
-            config = json.load(f)
+            config = load(f)  # This will auto-reconstruct objects with metadata
         print(f"Configuration type: {config['type']}")
+
+        # Reconstruct config objects if needed
+        if 'base_params' in config:
+            config['base_params'] = reconstruct_config_objects(config['base_params'])
 
         # Load pickled object
         print("\nLoading pickled object...")
@@ -265,3 +318,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

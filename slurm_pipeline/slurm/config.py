@@ -21,6 +21,8 @@ class SlurmConfig:
     qos: Optional[str] = None
     constraint: Optional[str] = None
     gres: Optional[str] = None
+    nodelist: Optional[str] = None  # Specific nodes to use (e.g., "node001" or "node[001-003]")
+    exclude_nodes: Optional[str] = None   # Nodes to exclude (e.g., "node004,node005")
     modules: List[str] = field(default_factory=list)
     conda_env: Optional[str] = None
     setup_commands: List[str] = field(default_factory=list)
@@ -78,6 +80,10 @@ class SlurmConfig:
             lines.append(f"#SBATCH --qos={self.qos}")
         if self.constraint:
             lines.append(f"#SBATCH --constraint={self.constraint}")
+        if self.nodelist:
+            lines.append(f"#SBATCH --nodelist={self.nodelist}")
+        if self.exclude_nodes:
+            lines.append(f"#SBATCH --exclude={self.exclude_nodes}")
         if self.gres:
             lines.append(f"#SBATCH --gres={self.gres}")
         if self.array_size:
