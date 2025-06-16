@@ -18,6 +18,7 @@ from pathlib import Path
 from datetime import datetime
 from collections.abc import Callable
 
+from .json_encoder import DataclassJSONEncoder
 from .config import SlurmConfig
 from .monitor import SlurmMonitor
 from .job_tracker import JobTracker
@@ -445,7 +446,7 @@ class SlurmPipeline:
         config_file = self.nfs_input_dir / f"{slurm_config.job_name}_config.json"
         print('config = ', config)
         with open(config_file, 'w') as f:
-            json.dump(config, f, indent=2)
+            json.dump(config, f, indent=2, cls=DataclassJSONEncoder)
 
         # Create runner script
         runner_script = self._create_runner_script()
