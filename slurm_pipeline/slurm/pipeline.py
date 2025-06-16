@@ -8,6 +8,7 @@ Simplified version: One ensemble = One SLURM job
 
 import os
 import sys
+import signal
 import json
 import pickle
 import subprocess
@@ -78,6 +79,7 @@ class SlurmPipeline:
         self.track_jobs = track_jobs
         if track_jobs:
             self.job_tracker = JobTracker()
+            self.job_tracker.set_verbose(True)
         else:
             self.job_tracker = None
 
@@ -494,11 +496,28 @@ class SlurmPipeline:
 
         print(f"Submitting script: {script_path}")
 
-        result = subprocess.run(
+        # Function to reset signal handlers in child processes
+        def reset_signals():
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+        # Use Popen with preexec_fn to reset signals in child
+        process = subprocess.Popen(
             ['sbatch', str(script_path)],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            cwd=str(script_path.parent)  # Run from script directory
+            cwd=str(script_path.parent),  # Run from script directory
+            preexec_fn=reset_signals
+        )
+
+        # Grab process output
+        stdout, stderr = process.communicate()
+        result = subprocess.CompletedProcess(
+            args=['sbatch', str(script_path)],
+            returncode=process.returncode,
+            stdout=stdout,
+            stderr=stderr
         )
 
         # Save submission info regardless of success

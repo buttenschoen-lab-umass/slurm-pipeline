@@ -20,8 +20,6 @@ class JobTracker:
     """
     _instance = None
     _initialized = False
-    _cleanup_lock = threading.Lock()
-    _cleanup_done = False
 
     def __new__(cls):
         if cls._instance is None:
@@ -38,6 +36,8 @@ class JobTracker:
             self.verbose = True
             self._original_handlers = {}
             self._in_signal_handler = False
+            self._cleanup_lock = threading.Lock()
+            self._cleanup_done = False
             self._setup_handlers()
             self.__class__._initialized = True
 
@@ -86,14 +86,11 @@ class JobTracker:
         # Reset flag
         self._in_signal_handler = False
 
-        # Restore original handler
-        if signum in self._original_handlers:
-            signal.signal(signum, self._original_handlers[signum])
-        else:
-            signal.signal(signum, signal.SIG_DFL)
+        # Exit
+        if self.verbose:
+            print('Exiting...')
 
-        # Re-raise the signal to allow normal termination
-        os.kill(os.getpid(), signum)
+        os._exit(1)
 
     def _get_signal_name(self, signum):
         """Get human-readable signal name."""
@@ -121,7 +118,7 @@ class JobTracker:
                     print(f"[JobTracker] Job {job_id} completed - Active jobs: {len(self.active_jobs)}")
 
     def cancel_job(self, job_id: str, reason: str = "Script terminated") -> bool:
-        """Cancel a specific job."""
+        """Cancel a specific job - public API."""
         with self._cleanup_lock:
             if job_id not in self.active_jobs:
                 return False
@@ -129,56 +126,11 @@ class JobTracker:
             if self.verbose:
                 print(f"[JobTracker] Cancelling job {job_id}: {reason}")
 
-            try:
-                # First check if job is still active
-                check_result = subprocess.run(
-                    ['squeue', '-j', job_id, '--noheader'],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-
-                if not check_result.stdout.strip():
-                    # Job not in queue, might have completed
-                    self.active_jobs.discard(job_id)
-                    self.completed_jobs.add(job_id)
-                    if self.verbose:
-                        print(f"[JobTracker]   Job {job_id} already completed")
-                    return True
-
-                # Job is active, cancel it
-                cancel_result = subprocess.run(
-                    ['scancel', job_id],
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
-
-                if cancel_result.returncode == 0:
-                    self.active_jobs.discard(job_id)
-                    self.cancelled_jobs.add(job_id)
-                    if self.verbose:
-                        print(f"[JobTracker]   Successfully cancelled job {job_id}")
-                    return True
-                else:
-                    self.failed_cancellations.add(job_id)
-                    if self.verbose:
-                        print(f"[JobTracker]   Failed to cancel job {job_id}: {cancel_result.stderr}")
-                    return False
-
-            except subprocess.TimeoutExpired:
-                self.failed_cancellations.add(job_id)
-                if self.verbose:
-                    print(f"[JobTracker]   Timeout while cancelling job {job_id}")
-                return False
-            except Exception as e:
-                self.failed_cancellations.add(job_id)
-                if self.verbose:
-                    print(f"[JobTracker]   Error cancelling job {job_id}: {e}")
-                return False
+            success = self._cancel_single_job_unlocked(job_id)
+            return success
 
     def cancel_all_active(self) -> Dict[str, int]:
-        """Cancel all active jobs and return statistics."""
+        """Cancel all active jobs - public API."""
         with self._cleanup_lock:
             if not self.active_jobs:
                 return {'cancelled': 0, 'failed': 0, 'already_done': 0}
@@ -192,47 +144,53 @@ class JobTracker:
                 print(f"\n[JobTracker] Cancelling {len(jobs_to_cancel)} active jobs...")
 
             for job_id in jobs_to_cancel:
-                # Don't use self.cancel_job here to avoid nested locks
-                try:
-                    # Check if job is still active
-                    check_result = subprocess.run(
-                        ['squeue', '-j', job_id, '--noheader'],
-                        capture_output=True,
-                        text=True,
-                        timeout=5
-                    )
-
-                    if not check_result.stdout.strip():
-                        # Job not in queue
-                        self.active_jobs.discard(job_id)
-                        self.completed_jobs.add(job_id)
-                        stats['already_done'] += 1
-                        continue
-
-                    # Cancel the job
-                    cancel_result = subprocess.run(
-                        ['scancel', job_id],
-                        capture_output=True,
-                        text=True,
-                        timeout=10
-                    )
-
-                    if cancel_result.returncode == 0:
-                        self.active_jobs.discard(job_id)
-                        self.cancelled_jobs.add(job_id)
-                        stats['cancelled'] += 1
-                    else:
-                        self.failed_cancellations.add(job_id)
-                        stats['failed'] += 1
-
-                except Exception:
-                    self.failed_cancellations.add(job_id)
+                if self._cancel_single_job_unlocked(job_id):
+                    stats['cancelled'] += 1
+                else:
                     stats['failed'] += 1
 
             return stats
 
+    def _cancel_single_job_unlocked(self, job_id: str) -> bool:
+        """
+        Cancel a single job. Assumes _cleanup_lock is already held.
+        This is the core cancellation logic used by all other methods.
+        """
+        try:
+            # Run scancel - returns 0 even for non-existent jobs
+            result = subprocess.run(
+                ['scancel', job_id],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+
+            # Always remove from tracking regardless of result
+            self.active_jobs.discard(job_id)
+            self.cancelled_jobs.add(job_id)
+
+            if self.verbose:
+                print(f"[JobTracker]   Sent cancel signal to job {job_id}")
+
+            return True
+
+        except subprocess.TimeoutExpired:
+            # Timeout - still remove from active jobs
+            self.active_jobs.discard(job_id)
+            self.cancelled_jobs.add(job_id)
+            if self.verbose:
+                print(f"[JobTracker]   Timeout cancelling job {job_id} (removed from tracking)")
+            return False
+
+        except Exception as e:
+            self.active_jobs.discard(job_id)
+            self.failed_cancellations.add(job_id)
+            if self.verbose:
+                print(f"[JobTracker]   Error cancelling job {job_id}: {e}")
+            return False
+
     def _cleanup(self):
-        """Cancel all active jobs on exit."""
+        """Cancel all active jobs on exit - main cleanup entry point."""
         with self._cleanup_lock:
             # Prevent multiple cleanup calls
             if self._cleanup_done:
@@ -247,12 +205,22 @@ class JobTracker:
             print(f"[JobTracker] Cleanup: Cancelling {len(self.active_jobs)} active SLURM jobs...")
             print(f"{'='*60}")
 
-            stats = self.cancel_all_active()
+            cancelled = 0
+            failed = 0
+
+            # Copy to avoid modification during iteration
+            jobs_to_cancel = list(self.active_jobs)
+
+            # Cancel all jobs while holding the lock
+            for job_id in jobs_to_cancel:
+                if self._cancel_single_job_unlocked(job_id):
+                    cancelled += 1
+                else:
+                    failed += 1
 
             print(f"[JobTracker] Cleanup complete:")
-            print(f"  - Cancelled: {stats['cancelled']}")
-            print(f"  - Already done: {stats['already_done']}")
-            print(f"  - Failed: {stats['failed']}")
+            print(f"  - Cancelled: {cancelled}")
+            print(f"  - Failed: {failed}")
             print(f"{'='*60}\n")
 
     def __del__(self):
@@ -307,24 +275,3 @@ class JobTracker:
                 print("[JobTracker] State reset")
 
 
-# Additional helper function to ensure signal handling works
-def ensure_signal_handling():
-    """
-    Ensure that signal handling is properly set up.
-    Call this at the start of your script if having issues with Ctrl-C.
-    """
-    # Make sure we're in the main thread
-    if threading.current_thread() is not threading.main_thread():
-        return
-
-    # Reset SIGINT to default first to ensure clean state
-    signal.signal(signal.SIGINT, signal.default_int_handler)
-
-    # Now the JobTracker can properly override it
-    tracker = JobTracker()
-
-    # Force immediate signal delivery (Unix/Linux)
-    if hasattr(signal, 'siginterrupt'):
-        signal.siginterrupt(signal.SIGINT, True)
-
-    return tracker
