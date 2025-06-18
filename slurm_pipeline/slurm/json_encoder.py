@@ -111,22 +111,6 @@ class DataclassJSONEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-# Convenience functions that use the custom encoder
-def dumps(obj: Any, **kwargs) -> str:
-    """
-    Serialize obj to a JSON formatted string using DataclassJSONEncoder.
-
-    Args:
-        obj: The object to serialize
-        **kwargs: Additional arguments passed to json.dumps
-
-    Returns:
-        JSON string representation
-    """
-    kwargs.setdefault('cls', DataclassJSONEncoder)
-    return json.dumps(obj, **kwargs)
-
-
 def dump(obj: Any, fp, **kwargs) -> None:
     """
     Serialize obj as a JSON formatted stream to fp using DataclassJSONEncoder.
@@ -174,21 +158,6 @@ def reconstruct_from_dict(data: dict) -> Any:
             data['__class_name__'] = class_name
 
     return data
-
-
-def loads(s: str, **kwargs) -> Any:
-    """
-    Deserialize JSON string, attempting to reconstruct objects with class metadata.
-
-    Args:
-        s: JSON string
-        **kwargs: Additional arguments passed to json.loads
-
-    Returns:
-        Deserialized object
-    """
-    data = json.loads(s, **kwargs)
-    return reconstruct_from_dict(data)
 
 
 def load(fp, **kwargs) -> Any:
