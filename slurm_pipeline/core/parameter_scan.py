@@ -106,7 +106,8 @@ class ParameterScan:
                  ensemble_analysis_functions: Optional[Dict[str, Callable]] = None,
                  ensemble_plot_functions: Optional[Dict[str, Callable]] = None,
                  scan_analysis_function: Optional[Callable] = None,
-                 scan_plot_function: Optional[Callable] = None):
+                 scan_plot_function: Optional[Callable] = None,
+                 max_combinations: int = 100000):
         """
         Initialize parameter scan.
 
@@ -118,11 +119,13 @@ class ParameterScan:
             ensemble_analysis_functions, ensemble_plot_functions: For ensembles
             scan_analysis_function: Function to analyze the whole scan
             scan_plot_function: Function to plot scan results
+            max_combinations: Maximum allowed parameter combinations (default: 100,000)
         """
         self.model_type = model_type
         self.base_params = base_params
         self.integrator_params = integrator_params
         self.scan_params = scan_params
+        self.max_combinations = max_combinations
 
         # Functions for different levels
         self.analysis_functions = analysis_functions
@@ -136,8 +139,83 @@ class ParameterScan:
         # Results storage
         self.scan_results: Dict[Tuple, Dict[str, Any]] = {}
 
+        # Validate scan_params to prevent memory explosions
+        self._validate_scan_params()
+
+    def _validate_scan_params(self):
+        """
+        Validate scan_params to prevent accidental memory explosions.
+
+        This checks if the Cartesian product of all scan parameters would create
+        an unreasonably large number of combinations, which could cause memory errors.
+
+        Raises:
+            ValueError: If the number of combinations exceeds self.max_combinations
+
+        Example:
+            # This would raise an error with default max_combinations=100,000:
+            scan_params = {
+                'param1': [1, 2, 3, 4],  # 4 values
+                'param2': [1, 2, 3, 4],  # 4 values
+                # ... 14 more parameters with 4 values each
+                # Total: 4^16 = 4,294,967,296 combinations!
+            }
+        """
+        if not self.scan_params:
+            return
+
+        # Calculate total number of combinations
+        n_combinations = 1
+        param_info = []
+
+        for param_name, values in self.scan_params.items():
+            if not isinstance(values, (list, tuple)):
+                raise ValueError(
+                    f"scan_params['{param_name}'] must be a list or tuple, "
+                    f"got {type(values).__name__}"
+                )
+
+            n_values = len(values)
+            n_combinations *= n_values
+            param_info.append(f"  - {param_name}: {n_values} values")
+
+        # Check if number of combinations is reasonable
+        if n_combinations > self.max_combinations:
+            param_summary = "\n".join(param_info)
+
+            raise ValueError(
+                f"Parameter scan would create {n_combinations:,} combinations, "
+                f"which exceeds the maximum of {self.max_combinations:,}.\n\n"
+                f"Parameters:\n{param_summary}\n\n"
+                f"This likely indicates an error in how scan_params is structured.\n\n"
+                f"Common mistake: Including all parameter VALUES in scan_params instead of "
+                f"just the parameters you want to SWEEP over.\n\n"
+                f"Example of CORRECT usage:\n"
+                f"  scan_params = {{\n"
+                f"      'temperature': [10, 20, 30],  # 3 values\n"
+                f"      'pressure': [1.0, 2.0],       # 2 values\n"
+                f"  }}  # Creates 3 × 2 = 6 combinations\n\n"
+                f"Example of INCORRECT usage:\n"
+                f"  scan_params = {{\n"
+                f"      'temperature': [10, 20, 30, 40],     # 4 values\n"
+                f"      'pressure': [1, 2, 3, 4],            # 4 values\n"
+                f"      'volume': [10, 20, 30, 40],          # 4 values\n"
+                f"      # ... 13 more params with 4 values each\n"
+                f"  }}  # Creates 4^16 = 4,294,967,296 combinations!\n\n"
+                f"If you really need {n_combinations:,} combinations, increase max_combinations "
+                f"when creating ParameterScan:\n"
+                f"  ParameterScan(..., max_combinations={n_combinations})"
+            )
+
+        # Log validation success
+        if n_combinations > 1000:
+            print(f"ParameterScan validation: {n_combinations:,} parameter combinations")
+
     def create_parameter_index(self, output_dir: str):
         """Create an index file mapping parameters to directories."""
+        # Ensure output directory exists
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
         index_file = Path(output_dir) / 'parameter_index.csv'
 
         param_names = list(self.scan_params.keys())

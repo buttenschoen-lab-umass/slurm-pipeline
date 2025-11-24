@@ -25,9 +25,23 @@ def _run_single_simulation(model_type: type,
     """
     Helper function to run a single simulation.
     """
+    # Create HDF5 output file path if output_dir is provided
+    # This enables memory-efficient streaming for models that support it
+    sim_output_dir = None
+    hdf5_output_file = None
+    if output_dir:
+        sim_output_dir = os.path.join(output_dir, f"simulation_{sim_index:03d}")
+        os.makedirs(sim_output_dir, exist_ok=True)
+        hdf5_output_file = os.path.join(sim_output_dir, "trajectory.h5")
+
+    # Add output_file to integrator_params for memory-efficient streaming
+    integrator_params_with_output = integrator_params.copy()
+    if hdf5_output_file:
+        integrator_params_with_output['output_file'] = hdf5_output_file
+
     # Create pipeline with sim_index as sim_id
     pipeline = SimulationPipeline(
-        model_type, params, integrator_params,
+        model_type, params, integrator_params_with_output,
         analysis_functions, plot_functions, animation_function,
         sim_id=sim_index
     )
@@ -57,9 +71,6 @@ def _run_single_simulation(model_type: type,
 
     result = pipeline.run(T, progress=False)
     result = pipeline.analyze(result)
-
-    # Output directory
-    sim_output_dir = os.path.join(output_dir, f"simulation_{sim_index:03d}")
 
     # Create visualizations if requested
     if output_dir and (create_plots or create_animation):
@@ -214,8 +225,22 @@ class Ensemble:
             for i in iterator:
                 # Use starting_sim_id + i as the actual sim_id
                 sim_id = self.starting_sim_id + i
+
+                # Create HDF5 output file path if output_dir is provided
+                sim_output_dir = None
+                hdf5_output_file = None
+                if output_dir:
+                    sim_output_dir = os.path.join(output_dir, f"simulation_{sim_id:03d}")
+                    os.makedirs(sim_output_dir, exist_ok=True)
+                    hdf5_output_file = os.path.join(sim_output_dir, "trajectory.h5")
+
+                # Add output_file to integrator_params for memory-efficient streaming
+                integrator_params_with_output = self.integrator_params.copy()
+                if hdf5_output_file:
+                    integrator_params_with_output['output_file'] = hdf5_output_file
+
                 pipeline = SimulationPipeline(
-                    self.model_type, self.params, self.integrator_params,
+                    self.model_type, self.params, integrator_params_with_output,
                     self.analysis_functions, self.plot_functions, self.animation_function,
                     sim_id=sim_id  # Pass the correct sim_id
                 )
@@ -225,7 +250,6 @@ class Ensemble:
                 # Create visualizations if requested
                 should_visualize = i in visualize_indices
                 if output_dir and should_visualize and (create_individual_plots or create_individual_animations):
-                    sim_output_dir = os.path.join(output_dir, f"simulation_{sim_id:03d}")
                     result = pipeline.visualize(result, sim_output_dir,
                                               plots=create_individual_plots,
                                               animation=create_individual_animations)
